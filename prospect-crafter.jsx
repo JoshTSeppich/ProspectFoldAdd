@@ -38,7 +38,20 @@ Given a NAICS code and industry description, return a JSON object with this exac
   ]
 }
 
-Return ONLY valid JSON. No preamble, no markdown fences. Be specific and tactical — this is for finding eligible companies, not individuals.`;
+## Example of exceptional output quality
+
+Input: NAICS 522320 — Financial Transaction Processing (Fintech)
+
+Output:
+{"summary":"Series A–C fintech companies ($5M–$80M ARR) that have built payment, lending, or transaction infrastructure and are under pressure to add AI-powered fraud detection, compliance automation, or customer intelligence without expanding their engineering headcount.","icp":{"company_types":["Embedded finance API vendors (banking-as-a-service, lending-as-a-service)","Payment middleware companies connecting merchants to acquirers","Expense management SaaS with card issuance (Brex/Ramp-tier)","Neobanks with proprietary transaction ledgers","Lending platforms doing >$50M/yr origination volume"],"company_sizes":["50–300 employees","Series A–C","$5M–$80M ARR","$10M–$100M raised"],"qualifying_criteria":["Has posted ML engineer, data scientist, or AI engineer job listings in the last 90 days (LinkedIn/Greenhouse)","Engineering team is >20% of total headcount based on LinkedIn employee data","Processes >$1B/year in transaction volume (detectable from press releases or Crunchbase funding context)","Uses Stripe, Plaid, or Marqeta as infrastructure (visible in job postings or tech stack pages)","Has a dedicated compliance or risk team but no AI/ML tooling listed in job requirements"],"signals":["CTO or VP Engineering hired from Stripe, Square, Adyen, or Affirm in last 12 months","Job postings mention 'fraud model', 'transaction scoring', or 'real-time decisioning'","Raised Series B or C in last 18 months — growth pressure to automate ops without hiring","Press coverage of a compliance failure, regulatory fine, or fraud incident in last 24 months","Engineering blog posts about building internal tooling for risk or compliance"]},"angles":[{"name":"Fraud Intelligence Automation","hypothesis":"Payment companies are spending 2–5% of revenue on manual fraud review and are one regulatory cycle away from needing real-time ML decisioning. They have the transaction data but not the ML infrastructure to act on it. Foxworks can build the fraud scoring layer in 8–12 weeks without them needing to hire a ML team.","hook":"Your fraud team is reviewing transactions that an AI model could flag in 40ms — we build that model on your data."},{"name":"Compliance Automation for High-Growth Lenders","hypothesis":"Fintech lenders scaling from $50M to $500M origination volume hit a wall where manual compliance review becomes the growth bottleneck. They need AI to auto-classify, flag, and audit loan files but can't afford to hire a 20-person compliance tech team.","hook":"We turn your compliance backlog from a headcount problem into a model — deployed in weeks, not quarters."}],"searches":{"apollo":[{"label":"Series B Fintech Building Payment Infrastructure","query":"Fintech companies 50-300 employees that process payments or lending, raised Series B, using Stripe or Plaid, actively hiring ML engineers","filters":{"industry":"Financial Services, Fintech","employee_count":"50-300","keywords":"payments, embedded finance, transaction processing, lending platform","technologies":"Stripe, Plaid, Marqeta","person_titles":"CTO, VP Engineering, Head of Data, Head of Risk","seniority":"director, vp, c_suite"}}],"google":[{"label":"Funded Fintech Hiring ML Engineers","query":"site:linkedin.com/jobs \"machine learning engineer\" OR \"fraud model\" fintech payments 2024 2025"}],"linkedin":[{"label":"Fintech Companies 51-200 Employees Using Stripe","query":"Company size: 51-200, Industry: Financial Services, Keywords: payments OR lending OR fintech, Technology: Stripe","url_hint":"LinkedIn Sales Navigator company search: industry=Financial Services, headcount=51-200, keywords=payments+lending"}]},"qualification_checklist":[{"criterion":"Transaction volume > $500M/year","how_to_verify":"Check press releases, Crunchbase, or ask directly — 'what's your current TPV?'"},{"criterion":"Engineering team > 15 people","how_to_verify":"LinkedIn headcount filter: company > filter by 'Engineering' department"},{"criterion":"No current ML/AI vendor relationship","how_to_verify":"Job postings — do they mention existing ML tools like DataRobot, H2O, or internal ML platform?"},{"criterion":"Raised funding in last 24 months","how_to_verify":"Crunchbase funding tab"}],"red_flags":["Already has a dedicated ML platform team of > 5 engineers (will build in-house)","Enterprise bank or credit union (procurement cycles > 12 months, not a fit)","Pre-product or pre-revenue — no transaction data to model against","Primary market is consumer payments at scale (Stripe, PayPal tier — won't outsource core ML)"],"enrichment_urls":[{"label":"Crunchbase Fintech Funding","url":"https://www.crunchbase.com/discover/organizations?facet_ids=category_groups%2Ffinancial-services&funding_total=5000000&last_funding_type=series_b","why":"Filter by funding stage and amount to find companies at the exact growth stage where AI investment makes sense"},{"label":"FinTech Global Company Database","url":"https://fintech.global/directory/","why":"Curated directory of fintech companies by subsector — faster than Apollo for initial vertical mapping"}]}
+
+## Your output must match this quality bar:
+- qualifying_criteria must be verifiable from public data (job postings, LinkedIn, press releases) — not assumptions
+- signals must be observable without talking to the company — external evidence only
+- hooks must be outcome-specific and speak to a business pressure, not a feature
+- apollo search filters must be specific enough to return < 500 companies, not thousands
+
+Return ONLY valid JSON. No preamble, no markdown fences.`;
 
 // Curated NAICS codes most relevant to B2B AI/software sales
 const SUGGESTED_NAICS = [
@@ -871,11 +884,13 @@ Build me a full prospecting intelligence package for this target.`;
           "Content-Type": "application/json",
           "x-api-key": apiKey,
           "anthropic-version": "2023-06-01",
+          "anthropic-beta": "interleaved-thinking-2025-05-14",
           "anthropic-dangerous-direct-browser-access": "true",
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 4096,
+          model: "claude-opus-4-6",
+          max_tokens: 16000,
+          thinking: { type: "enabled", budget_tokens: 8000 },
           stream: true,
           system: ANTHROPIC_SYSTEM,
           messages: [{ role: "user", content: prompt }]
@@ -890,6 +905,7 @@ Build me a full prospecting intelligence package for this target.`;
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let accumulated = "";
+      let inThinkingBlock = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -901,7 +917,20 @@ Build me a full prospecting intelligence package for this target.`;
           if (raw === "[DONE]") continue;
           try {
             const event = JSON.parse(raw);
-            if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
+            if (event.type === "content_block_start") {
+              if (event.content_block?.type === "thinking") {
+                inThinkingBlock = true;
+                setPhase("Thinking deeply about this vertical...");
+              } else if (event.content_block?.type === "text") {
+                inThinkingBlock = false;
+                setPhase("Analyzing target industry...");
+              }
+            }
+            if (
+              event.type === "content_block_delta" &&
+              event.delta?.type === "text_delta" &&
+              !inThinkingBlock
+            ) {
               accumulated += event.delta.text;
               setStreamText(accumulated);
               setPhase(getPhase(accumulated));
