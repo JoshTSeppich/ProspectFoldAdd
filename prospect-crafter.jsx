@@ -800,12 +800,21 @@ export default function ProspectCrafter() {
   const [history, setHistory] = useState(() => {
     try { return JSON.parse(localStorage.getItem("prospect_history") || "[]"); } catch { return []; }
   });
+  const [dealHistory, setDealHistory] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("prospect_deal_history") || "[]"); } catch { return []; }
+  });
+  const [showDealForm, setShowDealForm] = useState(false);
+  const [dealForm, setDealForm] = useState({
+    companyName: "", companySize: "", dealSize: "",
+    outcome: "won", winningAngle: "", lostReason: "", notes: "",
+  });
 
   const dropdownRef = useRef(null);
   const streamRef = useRef(null);
 
   useEffect(() => { localStorage.setItem("anthropic_key", apiKey); }, [apiKey]);
   useEffect(() => { localStorage.setItem("apollo_key", apolloKey); }, [apolloKey]);
+  useEffect(() => { localStorage.setItem("prospect_deal_history", JSON.stringify(dealHistory)); }, [dealHistory]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -924,6 +933,35 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
       }
     } catch { /* research failed — proceed without grounding */ }
 
+    // Deal history context
+    const currentSector = ALL_NAICS.find(n => n.code === naicsCode)?.sector;
+    const relevantDeals = dealHistory.filter(d =>
+      d.naicsCode === naicsCode ||
+      (currentSector && ALL_NAICS.find(n => n.code === d.naicsCode)?.sector === currentSector)
+    );
+    let dealContext = "";
+    if (relevantDeals.length > 0) {
+      const won = relevantDeals.filter(d => d.outcome === "won");
+      const lost = relevantDeals.filter(d => d.outcome === "lost");
+      const lines = ["Foxworks deal history for this vertical:"];
+      if (won.length) {
+        lines.push("WON DEALS:");
+        won.forEach(d => {
+          lines.push(`- ${d.companySize ? d.companySize + "-person " : ""}${d.naicsLabel}${d.dealSize ? ", " + d.dealSize : ""}${d.winningAngle ? `, angle: "${d.winningAngle}"` : ""}${d.notes ? ` — "${d.notes}"` : ""}`);
+        });
+      }
+      if (lost.length) {
+        lines.push("LOST DEALS:");
+        lost.forEach(d => {
+          lines.push(`- ${d.companySize ? d.companySize + "-person " : ""}${d.naicsLabel}${d.lostReason ? `, lost: "${d.lostReason}"` : ""}${d.notes ? ` — "${d.notes}"` : ""}`);
+        });
+      }
+      lines.push("");
+      lines.push("Use this history to weight your angles toward what has actually converted.");
+      lines.push("Flag patterns from losses as additional red flags.");
+      dealContext = lines.join("\n");
+    }
+
     // Phase 2: Generation
     const prompt = `Target industry: NAICS ${naicsCode} — ${naicsLabel}
 ${sizes.length ? `Company sizes: ${sizes.join(", ")} employees` : ""}
@@ -932,7 +970,9 @@ ${context ? `Additional context: ${context}` : ""}${researchContext ? `
 Current market research for this vertical:
 ${researchContext}
 
-Use this research to ground your intel package in real companies and real trends. Name specific companies as examples where relevant. Reference actual market pressures you found.` : ""}
+Use this research to ground your intel package in real companies and real trends. Name specific companies as examples where relevant. Reference actual market pressures you found.` : ""}${dealContext ? `
+
+${dealContext}` : ""}
 
 Build me a full prospecting intelligence package for this target.`;
 
@@ -1023,7 +1063,27 @@ Build me a full prospecting intelligence package for this target.`;
       setStreamText("");
       setPhase("");
     }
-  }, [naicsCode, naicsLabel, sizes, context, apiKey, history]);
+  }, [naicsCode, naicsLabel, sizes, context, apiKey, history, dealHistory]);
+
+  const submitDeal = useCallback(() => {
+    if (!dealForm.companyName.trim() || !naicsCode) return;
+    const entry = {
+      id: String(Date.now()),
+      naicsCode,
+      naicsLabel,
+      companyName: dealForm.companyName.trim(),
+      companySize: dealForm.companySize.trim(),
+      dealSize: dealForm.dealSize.trim(),
+      outcome: dealForm.outcome,
+      winningAngle: dealForm.winningAngle.trim() || null,
+      lostReason: dealForm.lostReason.trim() || null,
+      notes: dealForm.notes.trim(),
+      timestamp: Date.now(),
+    };
+    setDealHistory(prev => [entry, ...prev]);
+    setDealForm({ companyName: "", companySize: "", dealSize: "", outcome: "won", winningAngle: "", lostReason: "", notes: "" });
+    setShowDealForm(false);
+  }, [dealForm, naicsCode, naicsLabel]);
 
   const loadFromHistory = (entry) => {
     setNaicsCode(entry.naicsCode);
@@ -1369,6 +1429,140 @@ Build me a full prospecting intelligence package for this target.`;
           </div>
         )}
       </div>
+
+      {/* ── Deal History ── */}
+      {(() => {
+        const currentSector = ALL_NAICS.find(n => n.code === naicsCode)?.sector;
+        const relevantDeals = dealHistory.filter(d =>
+          d.naicsCode === naicsCode ||
+          (currentSector && ALL_NAICS.find(n => n.code === d.naicsCode)?.sector === currentSector)
+        );
+        const won = relevantDeals.filter(d => d.outcome === "won");
+        const lost = relevantDeals.filter(d => d.outcome === "lost");
+        return (
+          <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.radius, marginBottom: 20, boxShadow: T.shadow }}>
+            {/* Header */}
+            <div style={{ padding: "13px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: (showDealForm || relevantDeals.length > 0) ? `1px solid ${T.border}` : "none" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Deal History</span>
+                {relevantDeals.length > 0 && (
+                  <span style={{ fontSize: 11, fontWeight: 600, color: T.accent, background: T.accentBg, border: `1px solid ${T.accentBorder}`, borderRadius: 999, padding: "1px 8px" }}>
+                    {relevantDeals.length} for this vertical
+                  </span>
+                )}
+                {relevantDeals.length === 0 && !showDealForm && (
+                  <span style={{ fontSize: 12, color: T.textMuted }}>Log won/lost deals to improve future intel</span>
+                )}
+              </div>
+              <button
+                onClick={() => setShowDealForm(v => !v)}
+                style={{ background: showDealForm ? T.bg : T.accentBg, border: `1px solid ${showDealForm ? T.border : T.accentBorder}`, color: showDealForm ? T.textSub : T.accent, borderRadius: T.radiusSm, padding: "5px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}
+              >
+                {showDealForm ? "Cancel" : "+ Log a deal"}
+              </button>
+            </div>
+
+            {/* Log Deal Form */}
+            {showDealForm && (
+              <div style={{ padding: "18px 20px", borderBottom: relevantDeals.length > 0 ? `1px solid ${T.border}` : "none" }}>
+                {!naicsCode && (
+                  <div style={{ fontSize: 12, color: T.amber, background: T.amberBg, border: `1px solid ${T.amberBorder}`, borderRadius: T.radiusSm, padding: "7px 12px", marginBottom: 14 }}>
+                    Select a NAICS code above to tag this deal to a vertical.
+                  </div>
+                )}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 120px 120px", gap: 12, marginBottom: 12 }}>
+                  <div>
+                    <label style={{ ...label }}>Company Name *</label>
+                    <input value={dealForm.companyName} onChange={e => setDealForm(p => ({ ...p, companyName: e.target.value }))} placeholder="Acme Corp" style={{ ...inputBase, padding: "7px 12px", fontSize: 13 }} />
+                  </div>
+                  <div>
+                    <label style={{ ...label }}>Size (employees)</label>
+                    <input value={dealForm.companySize} onChange={e => setDealForm(p => ({ ...p, companySize: e.target.value }))} placeholder="85" style={{ ...inputBase, padding: "7px 12px", fontSize: 13 }} />
+                  </div>
+                  <div>
+                    <label style={{ ...label }}>Deal Size</label>
+                    <input value={dealForm.dealSize} onChange={e => setDealForm(p => ({ ...p, dealSize: e.target.value }))} placeholder="$22k" style={{ ...inputBase, padding: "7px 12px", fontSize: 13 }} />
+                  </div>
+                </div>
+                {/* Outcome toggle */}
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ ...label }}>Outcome</label>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {["won", "lost"].map(o => (
+                      <button key={o} onClick={() => setDealForm(p => ({ ...p, outcome: o }))} style={{ padding: "5px 16px", borderRadius: T.radiusSm, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", border: `1px solid ${dealForm.outcome === o ? (o === "won" ? T.greenBorder : T.redBorder) : T.border}`, background: dealForm.outcome === o ? (o === "won" ? T.greenBg : T.redBg) : T.surface, color: dealForm.outcome === o ? (o === "won" ? T.green : T.red) : T.textSub, transition: "all 0.1s" }}>
+                        {o === "won" ? "✓ Won" : "✗ Lost"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {/* Conditional angle / reason */}
+                <div style={{ marginBottom: 12 }}>
+                  {dealForm.outcome === "won" ? (
+                    <>
+                      <label style={{ ...label }}>Winning Angle</label>
+                      <input value={dealForm.winningAngle} onChange={e => setDealForm(p => ({ ...p, winningAngle: e.target.value }))} placeholder='e.g. "Ops Automation"' style={{ ...inputBase, padding: "7px 12px", fontSize: 13 }} />
+                    </>
+                  ) : (
+                    <>
+                      <label style={{ ...label }}>Lost Reason</label>
+                      <input value={dealForm.lostReason} onChange={e => setDealForm(p => ({ ...p, lostReason: e.target.value }))} placeholder='e.g. "already committed to in-house AI hire"' style={{ ...inputBase, padding: "7px 12px", fontSize: 13 }} />
+                    </>
+                  )}
+                </div>
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ ...label }}>Notes <span style={{ fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
+                  <input value={dealForm.notes} onChange={e => setDealForm(p => ({ ...p, notes: e.target.value }))} placeholder="Any context about what drove the outcome" style={{ ...inputBase, padding: "7px 12px", fontSize: 13 }} />
+                </div>
+                {naicsCode && (
+                  <div style={{ marginBottom: 16, fontSize: 12, color: T.textMuted }}>
+                    Tagged to: <span style={{ fontFamily: "monospace", color: T.accent, fontWeight: 600 }}>{naicsCode}</span> — {naicsLabel}
+                  </div>
+                )}
+                <button onClick={submitDeal} disabled={!dealForm.companyName.trim() || !naicsCode} style={{ background: dealForm.companyName.trim() && naicsCode ? T.accent : T.border, color: dealForm.companyName.trim() && naicsCode ? "#fff" : T.textMuted, border: "none", borderRadius: T.radiusSm, padding: "8px 20px", fontSize: 13, fontWeight: 700, cursor: dealForm.companyName.trim() && naicsCode ? "pointer" : "not-allowed", fontFamily: "inherit" }}>
+                  Log Deal
+                </button>
+              </div>
+            )}
+
+            {/* Existing deals */}
+            {relevantDeals.length > 0 && (
+              <div style={{ padding: "10px 20px 14px" }}>
+                {won.length > 0 && (
+                  <div style={{ marginBottom: lost.length > 0 ? 12 : 0 }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", color: T.green, textTransform: "uppercase", marginBottom: 6 }}>Won</div>
+                    {won.map(d => (
+                      <div key={d.id} style={{ display: "flex", alignItems: "baseline", gap: 10, padding: "5px 0", borderBottom: `1px solid ${T.bg}` }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: T.green }}>✓</span>
+                        <span style={{ fontSize: 13, color: T.text, fontWeight: 600, flex: "0 0 auto" }}>{d.companyName}</span>
+                        {d.companySize && <span style={{ fontSize: 11, color: T.textMuted }}>{d.companySize} ppl</span>}
+                        {d.dealSize && <span style={{ fontSize: 11, color: T.textMuted }}>{d.dealSize}</span>}
+                        {d.winningAngle && <span style={{ fontSize: 11, color: T.accent, fontStyle: "italic" }}>"{d.winningAngle}"</span>}
+                        {d.notes && <span style={{ fontSize: 11, color: T.textMuted, flex: 1 }}>— {d.notes}</span>}
+                        <button onClick={() => setDealHistory(prev => prev.filter(x => x.id !== d.id))} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 11, padding: "0 2px", lineHeight: 1 }} title="Remove">✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {lost.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", color: T.red, textTransform: "uppercase", marginBottom: 6 }}>{won.length > 0 ? "" : ""}Lost</div>
+                    {lost.map(d => (
+                      <div key={d.id} style={{ display: "flex", alignItems: "baseline", gap: 10, padding: "5px 0", borderBottom: `1px solid ${T.bg}` }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: T.red }}>✗</span>
+                        <span style={{ fontSize: 13, color: T.text, fontWeight: 600, flex: "0 0 auto" }}>{d.companyName}</span>
+                        {d.companySize && <span style={{ fontSize: 11, color: T.textMuted }}>{d.companySize} ppl</span>}
+                        {d.lostReason && <span style={{ fontSize: 11, color: T.red, fontStyle: "italic", flex: 1 }}>"{d.lostReason}"</span>}
+                        {d.notes && <span style={{ fontSize: 11, color: T.textMuted }}>— {d.notes}</span>}
+                        <button onClick={() => setDealHistory(prev => prev.filter(x => x.id !== d.id))} style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: 11, padding: "0 2px", lineHeight: 1 }} title="Remove">✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── Streaming Terminal ── */}
       {loading && streamText && (
