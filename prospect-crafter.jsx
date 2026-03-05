@@ -869,11 +869,70 @@ export default function ProspectCrafter() {
     setError(null);
     setResult(null);
     setStreamText("");
-    setPhase("Analyzing target industry...");
+    setPhase("Researching live market data...");
 
+    // Phase 1: Web search research (non-blocking — falls through on any error)
+    let researchContext = "";
+    try {
+      const researchPrompt = `You are researching a B2B sales target vertical for Foxworks Studios, an AI engineering firm.
+
+Research: ${naicsCode} — ${naicsLabel}
+
+Use web search to find:
+1. Companies in this vertical that raised Series A, B, or C funding in the last 18 months (company names, amounts, dates)
+2. Companies in this vertical currently hiring machine learning engineers, AI engineers, or data scientists (job board evidence)
+3. Notable technology shifts, compliance events, or market pressures in this vertical in the last 12 months
+4. 3–5 named example companies that represent the ideal buyer profile
+
+Return a JSON object:
+{
+  "recent_funding": [{ "company": string, "amount": string, "date": string, "stage": string }],
+  "hiring_ai": [{ "company": string, "role": string, "evidence": string }],
+  "market_pressures": ["string — specific, recent, named"],
+  "example_companies": [{ "name": string, "why": string }]
+}
+
+Return ONLY valid JSON. No preamble, no markdown fences.`;
+
+      const researchRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "web-search-2025-03-05",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-opus-4-6",
+          max_tokens: 4000,
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+          messages: [{ role: "user", content: researchPrompt }],
+        }),
+      });
+
+      if (researchRes.ok) {
+        const researchData = await researchRes.json();
+        const researchText = researchData.content
+          ?.filter((b) => b.type === "text")
+          .map((b) => b.text)
+          .join("") || "";
+        if (researchText.trim()) {
+          researchContext = researchText.replace(/```json|```/g, "").trim();
+          setPhase("Market data gathered — generating intelligence...");
+        }
+      }
+    } catch { /* research failed — proceed without grounding */ }
+
+    // Phase 2: Generation
     const prompt = `Target industry: NAICS ${naicsCode} — ${naicsLabel}
 ${sizes.length ? `Company sizes: ${sizes.join(", ")} employees` : ""}
-${context ? `Additional context: ${context}` : ""}
+${context ? `Additional context: ${context}` : ""}${researchContext ? `
+
+Current market research for this vertical:
+${researchContext}
+
+Use this research to ground your intel package in real companies and real trends. Name specific companies as examples where relevant. Reference actual market pressures you found.` : ""}
 
 Build me a full prospecting intelligence package for this target.`;
 
