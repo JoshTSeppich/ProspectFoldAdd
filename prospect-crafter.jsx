@@ -544,7 +544,7 @@ function buildMarkdown(result, naicsCode, naicsLabel) {
   return lines.join("\n");
 }
 
-function CopyButton({ text }) {
+function CopyButton({ text, label = "COPY", successLabel = "✓ COPIED" }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
     navigator.clipboard.writeText(text);
@@ -565,7 +565,7 @@ function CopyButton({ text }) {
       letterSpacing: "0.04em",
       fontFamily: "inherit",
     }}>
-      {copied ? "✓ COPIED" : "COPY"}
+      {copied ? successLabel : label}
     </button>
   );
 }
