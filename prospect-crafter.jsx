@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 
 const ANTHROPIC_SYSTEM = `You are a B2B company prospecting intelligence engine for Foxworks Studios, an AI engineering collective. Your job is to identify and qualify eligible TARGET COMPANIES — not individual contacts.
 
@@ -759,7 +759,10 @@ function SearchCard({ item, platform, apolloKey }) {
                 <div>
                   <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{co.name}</div>
                   {co.website_url && (
-                    <div style={{ fontSize: 11, color: T.accent, marginTop: 1 }}>{co.website_url}</div>
+                    <div
+                      style={{ fontSize: 11, color: T.accent, marginTop: 1, cursor: "pointer", textDecoration: "underline" }}
+                      onClick={() => window.electronAPI?.openEventFold(co.website_url)}
+                    >{co.website_url}</div>
                   )}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
@@ -772,7 +775,10 @@ function SearchCard({ item, platform, apolloKey }) {
                 </div>
               </div>
               {co.linkedin_url && (
-                <div style={{ marginTop: 4, fontSize: 11, color: T.textSub }}>{co.linkedin_url}</div>
+                <div
+                  style={{ marginTop: 4, fontSize: 11, color: T.accent, cursor: "pointer", textDecoration: "underline" }}
+                  onClick={() => window.electronAPI?.openEventFold(co.linkedin_url)}
+                >{co.linkedin_url}</div>
               )}
             </div>
           ))}
@@ -809,12 +815,15 @@ export default function ProspectCrafter() {
     outcome: "won", winningAngle: "", lostReason: "", notes: "",
   });
 
+  const [copiedPackage, setCopiedPackage] = useState(false);
   const dropdownRef = useRef(null);
   const streamRef = useRef(null);
+  const abortRef = useRef(null);
 
   useEffect(() => { localStorage.setItem("anthropic_key", apiKey); }, [apiKey]);
   useEffect(() => { localStorage.setItem("apollo_key", apolloKey); }, [apolloKey]);
   useEffect(() => { localStorage.setItem("prospect_deal_history", JSON.stringify(dealHistory)); }, [dealHistory]);
+  useEffect(() => { localStorage.setItem("prospect_history", JSON.stringify(history)); }, [history]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -825,6 +834,17 @@ export default function ProspectCrafter() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        if (!loading && naicsCode) run();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [loading, naicsCode, run]);
 
   const toggleSize = (s) => setSizes(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
 
@@ -841,20 +861,24 @@ export default function ProspectCrafter() {
     setNaicsSearch("");
   };
 
-  const filteredNaics = naicsSearch.trim()
-    ? ALL_NAICS.filter(n =>
-        n.label.toLowerCase().includes(naicsSearch.toLowerCase()) ||
-        n.code.includes(naicsSearch) ||
-        n.sector.toLowerCase().includes(naicsSearch.toLowerCase())
-      )
-    : null;
+  const filteredNaics = useMemo(() =>
+    naicsSearch.trim()
+      ? ALL_NAICS.filter(n =>
+          n.label.toLowerCase().includes(naicsSearch.toLowerCase()) ||
+          n.code.includes(naicsSearch) ||
+          n.sector.toLowerCase().includes(naicsSearch.toLowerCase())
+        )
+      : null,
+  [naicsSearch]);
 
-  const groupedFiltered = filteredNaics
-    ? filteredNaics.reduce((acc, n) => {
-        (acc[n.sector] = acc[n.sector] || []).push(n);
-        return acc;
-      }, {})
-    : null;
+  const groupedFiltered = useMemo(() =>
+    filteredNaics
+      ? filteredNaics.reduce((acc, n) => {
+          (acc[n.sector] = acc[n.sector] || []).push(n);
+          return acc;
+        }, {})
+      : null,
+  [filteredNaics]);
 
   const getPhase = (text) => {
     if (text.includes('"enrichment_urls"'))         return "Finding enrichment sources...";
@@ -874,6 +898,9 @@ export default function ProspectCrafter() {
   const run = useCallback(async () => {
     if (!naicsCode) { setError("Select a NAICS code to target."); return; }
     if (!apiKey.trim()) { setError("Add your Anthropic API key above first."); return; }
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
     setError(null);
     setResult(null);
@@ -905,6 +932,7 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
 
       const researchRes = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
+        signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
           "x-api-key": apiKey,
@@ -931,7 +959,11 @@ Return ONLY valid JSON. No preamble, no markdown fences.`;
           setPhase("Market data gathered — generating intelligence...");
         }
       }
-    } catch { /* research failed — proceed without grounding */ }
+    } catch (e) {
+      if (e?.name === "AbortError") throw e;
+      setPhase("⚠ Web research failed — continuing with training data...");
+      await new Promise(r => setTimeout(r, 1200));
+    }
 
     // Deal history context
     const currentSector = ALL_NAICS.find(n => n.code === naicsCode)?.sector;
@@ -979,6 +1011,7 @@ Build me a full prospecting intelligence package for this target.`;
     try {
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
+        signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
           "x-api-key": apiKey,
@@ -1053,17 +1086,17 @@ Build me a full prospecting intelligence package for this target.`;
         result: parsed,
         timestamp: Date.now(),
       };
-      const newHistory = [entry, ...history].slice(0, 15);
-      setHistory(newHistory);
-      localStorage.setItem("prospect_history", JSON.stringify(newHistory));
+      setHistory(prev => [entry, ...prev].slice(0, 15));
     } catch (e) {
-      setError(e.message || "Failed to generate — check your API key and try again.");
+      if (e.name !== "AbortError") {
+        setError(e.message || "Failed to generate — check your API key and try again.");
+      }
     } finally {
       setLoading(false);
       setStreamText("");
       setPhase("");
     }
-  }, [naicsCode, naicsLabel, sizes, context, apiKey, history, dealHistory]);
+  }, [naicsCode, naicsLabel, sizes, context, apiKey, dealHistory]);
 
   const submitDeal = useCallback(() => {
     if (!dealForm.companyName.trim() || !naicsCode) return;
@@ -1142,6 +1175,11 @@ Build me a full prospecting intelligence package for this target.`;
       margin: "0 auto",
     }}>
 
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+      `}</style>
       {/* ── Header ── */}
       <div style={{
         display: "flex",
@@ -1384,17 +1422,19 @@ Build me a full prospecting intelligence package for this target.`;
         {/* Additional Context */}
         <div style={{ marginBottom: 20 }}>
           <label style={label}>Additional Context <span style={{ fontWeight: 400, color: T.textMuted }}>(optional)</span></label>
-          <input
+          <textarea
             value={context}
             onChange={e => setContext(e.target.value)}
             placeholder={'e.g. "We sell custom AI agents, avg deal $15k, focus on ops-heavy companies"'}
-            style={{ ...inputBase, padding: "9px 14px", fontSize: 13 }}
+            rows={3}
+            style={{ ...inputBase, padding: "9px 14px", fontSize: 13, resize: "vertical", lineHeight: 1.5 }}
           />
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <button
             onClick={run}
+            title="⌘↩"
             disabled={loading || !naicsCode}
             style={{
               background: loading || !naicsCode ? T.border : T.accent,
@@ -1415,9 +1455,27 @@ Build me a full prospecting intelligence package for this target.`;
             {loading ? "Analyzing..." : "Generate Intel Package →"}
           </button>
           {loading && (
+            <button
+              onClick={() => { if (abortRef.current) abortRef.current.abort(); }}
+              style={{
+                background: T.redBg,
+                border: `1px solid ${T.redBorder}`,
+                color: T.red,
+                borderRadius: T.radiusSm,
+                padding: "10px 16px",
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: "pointer",
+                fontFamily: "inherit",
+                letterSpacing: "0.04em",
+              }}
+            >
+              ✕ Cancel
+            </button>
+          )}
+          {loading && (
             <span style={{ fontSize: 12, color: T.accent, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
-              <style>{`@keyframes spin{to{transform:rotate(360deg)}} @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
-              <span style={{ display: "inline-block", width: 12, height: 12, border: `2px solid ${T.accentBorder}`, borderTopColor: T.accent, borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
+                <span style={{ display: "inline-block", width: 12, height: 12, border: `2px solid ${T.accentBorder}`, borderTopColor: T.accent, borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
               <span style={{ animation: "pulse 1.6s ease infinite" }}>{phase}</span>
             </span>
           )}
@@ -1628,8 +1686,7 @@ Build me a full prospecting intelligence package for this target.`;
       {/* ── Results ── */}
       {result && (
         <div style={{ animation: "fadeIn 0.3s ease" }}>
-          <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}`}</style>
-
+  
           {/* Export Controls */}
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginBottom: 12 }}>
             <button
@@ -1654,6 +1711,39 @@ Build me a full prospecting intelligence package for this target.`;
               ↓ JSON
             </button>
             <CopyButton text={buildMarkdown(result, naicsCode, naicsLabel)} label="⊞ Copy Markdown" successLabel="✓ Copied!" />
+            <button
+              onClick={async () => {
+                const payload = JSON.stringify({
+                  __prospect_intel_v2: true,
+                  naicsCode,
+                  naicsLabel,
+                  summary: result.summary,
+                  apollo_searches: (result.searches?.apollo || []).map(s => ({
+                    label: s.label,
+                    query: s.query,
+                    filters: s.filters || {},
+                  })),
+                });
+                await navigator.clipboard.writeText(payload);
+                setCopiedPackage(true);
+                setTimeout(() => setCopiedPackage(false), 2000);
+              }}
+              style={{
+                background: copiedPackage ? T.greenBg : T.accentBg,
+                border: `1px solid ${copiedPackage ? T.greenBorder : T.accentBorder}`,
+                color: copiedPackage ? T.green : T.accent,
+                borderRadius: T.radiusSm,
+                padding: "6px 14px",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                fontFamily: "inherit",
+                transition: "all 0.15s",
+                letterSpacing: "0.03em",
+              }}
+            >
+              {copiedPackage ? "✓ Package Copied" : "→ EventFold (Full Package)"}
+            </button>
           </div>
 
           {/* ICP Summary Banner */}
@@ -1669,10 +1759,20 @@ Build me a full prospecting intelligence package for this target.`;
           </div>
 
           {/* ICP Details */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 0 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 0 }}>
             <Section title="Company Types" accent={T.accent} accentBg={T.accentBg} accentBorder={T.accentBorder}>
               <div style={{ display: "flex", flexWrap: "wrap" }}>
                 {result.icp?.company_types?.map((t, i) => <Tag key={i}>{t}</Tag>)}
+              </div>
+            </Section>
+            <Section title="Company Sizes" accent={T.accent} accentBg={T.accentBg} accentBorder={T.accentBorder}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {result.icp?.company_sizes?.map((s, i) => (
+                  <div key={i} style={{ fontSize: 13, color: T.text, display: "flex", gap: 8, alignItems: "flex-start" }}>
+                    <span style={{ color: T.accent, marginTop: 1, flexShrink: 0 }}>◉</span>
+                    <span>{s}</span>
+                  </div>
+                ))}
               </div>
             </Section>
             <Section title="Qualifying Criteria" accent={T.green} accentBg={T.greenBg} accentBorder={T.greenBorder}>

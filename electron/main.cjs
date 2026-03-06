@@ -65,6 +65,90 @@ ipcMain.handle("apollo:companies", async (_event, { apiKey, filters }) => {
   });
 });
 
+
+// ── IPC: Apollo Org Search ──────────────────────────────────────────────────
+ipcMain.handle("apollo:orgSearch", async (_event, { apiKey, orgName }) => {
+  const payload = {
+    api_key: apiKey,
+    q_organization_name: orgName,
+    page: 1,
+    per_page: 3,
+  };
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const req = https.request(
+      {
+        hostname: "api.apollo.io",
+        path: "/api/v1/mixed_companies/search",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+          "Cache-Control": "no-cache",
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => { data += chunk; });
+        res.on("end", () => {
+          try {
+            const json = JSON.parse(data);
+            if (json.error) return reject(new Error(json.error));
+            const orgs = json.organizations || [];
+            resolve({ organizations: orgs });
+          } catch (e) {
+            reject(new Error("Failed to parse Apollo org response"));
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+});
+
+// ── IPC: Apollo Contacts Search ─────────────────────────────────────────────
+ipcMain.handle("apollo:contacts", async (_event, { apiKey, orgId, titles }) => {
+  const payload = {
+    api_key: apiKey,
+    organization_ids: [orgId],
+    person_titles: titles,
+    page: 1,
+    per_page: 10,
+  };
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const req = https.request(
+      {
+        hostname: "api.apollo.io",
+        path: "/api/v1/mixed_people/search",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+          "Cache-Control": "no-cache",
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => { data += chunk; });
+        res.on("end", () => {
+          try {
+            const json = JSON.parse(data);
+            if (json.error) return reject(new Error(json.error));
+            resolve({ people: json.people || [] });
+          } catch (e) {
+            reject(new Error("Failed to parse Apollo contacts response"));
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+});
 // ── IPC: Open EventFold via deep link ───────────────────────────────────────
 ipcMain.handle("shell:openExternal", (_event, url) => {
   shell.openExternal(url);

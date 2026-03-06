@@ -1,0 +1,139 @@
+// Intelligence Package to Prospect Pipeline Database Schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Intelligence packages uploaded by users
+model IntelligencePackage {
+  id              String    @id @default(uuid())
+  title           String
+  markdownContent String    @db.Text
+  parsedData      Json      // IntelligencePackage interface as JSON
+  uploadedAt      DateTime  @default(now())
+  processedAt     DateTime?
+  prospectCount   Int       @default(0)
+  
+  prospects       Prospect[]
+  
+  @@map("intelligence_packages")
+}
+
+// Researched prospects from intelligence packages
+model Prospect {
+  id                     String    @id @default(uuid())
+  intelPackageId         String
+  intelPackage           IntelligencePackage @relation(fields: [intelPackageId], references: [id])
+  
+  // Identification
+  name                   String
+  domain                 String?
+  apolloOrgId            String?
+  
+  // Context from intel package
+  discoveryContext       String?   @db.Text
+  urgencyLevel           UrgencyLevel?
+  
+  // Qualification results
+  qualificationScore     Json?     // Object with hasLMS, hasAIPolicy, etc.
+  fitScore               Int?      // 0-100
+  isQualified            Boolean   @default(false)
+  disqualificationReason String?   @db.Text
+  
+  // Enrichment data
+  apolloData             Json?     // Organization data from Apollo
+  researchData           Json?     // ProspectResearch interface from Claude
+  
+  // Outreach strategy
+  recommendedSalesAngle  String?
+  personalizationHooks   String[]
+  
+  // Primary contact
+  primaryContactId       String?
+  
+  // Status
+  reachOutStatus         ReachOutStatus @default(NOT_STARTED)
+  researchedAt           DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  
+  contacts               Contact[]
+  outreachMessages       OutreachMessage[]
+  
+  @@map("prospects")
+}
+
+// Contacts found via Apollo API
+model Contact {
+  id                  String    @id @default(uuid())
+  prospectId          String
+  prospect            Prospect  @relation(fields: [prospectId], references: [id])
+  
+  apolloPersonId      String?   @unique
+  
+  name                String
+  title               String
+  email               String?
+  linkedinUrl         String?
+  department          String?
+  
+  isPrimary           Boolean   @default(false)
+  selectionRationale  String?   @db.Text
+  
+  createdAt           DateTime  @default(now())
+  
+  outreachMessages    OutreachMessage[]
+  
+  @@map("contacts")
+}
+
+// Drafted and sent outreach messages
+model OutreachMessage {
+  id                        String    @id @default(uuid())
+  prospectId                String
+  prospect                  Prospect  @relation(fields: [prospectId], references: [id])
+  
+  contactId                 String
+  contact                   Contact   @relation(fields: [contactId], references: [id])
+  
+  subject                   String
+  body                      String    @db.Text
+  
+  salesAngleUsed            String?
+  personalizationHooksUsed  String[]
+  
+  status                    MessageStatus @default(DRAFTED)
+  sentAt                    DateTime?
+  respondedAt               DateTime?
+  
+  createdAt                 DateTime  @default(now())
+  
+  @@map("outreach_messages")
+}
+
+enum UrgencyLevel {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum ReachOutStatus {
+  NOT_STARTED
+  DRAFTED
+  SENT
+  RESPONDED
+  DISQUALIFIED
+}
+
+enum MessageStatus {
+  DRAFTED
+  SENT
+  RESPONDED
+  BOUNCED
+}
