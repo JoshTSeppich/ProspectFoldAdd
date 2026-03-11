@@ -628,7 +628,7 @@ function Section({ title, accent = T.accent, accentBg = T.accentBg, accentBorder
   );
 }
 
-function SearchCard({ item, platform, apolloKey }) {
+function SearchCard({ item, platform, apolloKey, onCompaniesLoaded }) {
   const cfg = {
     apollo:   { color: T.amber,  bg: T.amberBg,  border: T.amberBorder  },
     google:   { color: T.green,  bg: T.greenBg,  border: T.greenBorder  },
@@ -648,6 +648,7 @@ function SearchCard({ item, platform, apolloKey }) {
       if (!api?.searchApolloCompanies) throw new Error("Run in the desktop app to use live search.");
       const res = await api.searchApolloCompanies({ apiKey: apolloKey, filters: item.filters || {} });
       setLiveResults(res);
+      if (onCompaniesLoaded && res.companies?.length) onCompaniesLoaded(res.companies);
     } catch (e) {
       setLiveError(e.message || "Apollo search failed.");
     } finally {
@@ -817,6 +818,7 @@ export default function ProspectCrafter() {
 
   const [copiedPackage, setCopiedPackage] = useState(false);
   const [copiedEmailFold, setCopiedEmailFold] = useState(false);
+  const [emailFoldCompanies, setEmailFoldCompanies] = useState([]);
   const dropdownRef = useRef(null);
   const streamRef = useRef(null);
   const abortRef = useRef(null);
@@ -1756,6 +1758,13 @@ Build me a full prospecting intelligence package for this target.`;
                   signals: result.icp?.signals || [],
                   qualifying_criteria: result.icp?.qualifying_criteria || [],
                   red_flags: result.red_flags || [],
+                  apollo_companies: emailFoldCompanies.slice(0, 25).map(c => ({
+                    name: c.name,
+                    website_url: c.website_url || c.primary_domain || "",
+                    industry: c.industry || "",
+                    num_employees: c.num_employees || null,
+                    short_description: c.short_description || "",
+                  })),
                 });
                 await navigator.clipboard.writeText(payload);
                 setCopiedEmailFold(true);
@@ -1867,7 +1876,7 @@ Build me a full prospecting intelligence package for this target.`;
               <button onClick={() => setActiveTab("google")} style={tabStyle(activeTab === "google", T.green, T.greenBg, T.greenBorder)}>Google</button>
               <button onClick={() => setActiveTab("linkedin")} style={tabStyle(activeTab === "linkedin", T.accent, T.accentBg, T.accentBorder)}>LinkedIn</button>
             </div>
-            {activeTab === "apollo"   && result.searches?.apollo?.map((item, i)   => <SearchCard key={i} item={item} platform="apollo"   apolloKey={apolloKey} />)}
+            {activeTab === "apollo"   && result.searches?.apollo?.map((item, i)   => <SearchCard key={i} item={item} platform="apollo"   apolloKey={apolloKey} onCompaniesLoaded={companies => setEmailFoldCompanies(prev => [...prev, ...companies].filter((c, idx, arr) => arr.findIndex(x => x.name === c.name) === idx).slice(0, 25))} />)}
             {activeTab === "google"   && result.searches?.google?.map((item, i)   => <SearchCard key={i} item={item} platform="google"   apolloKey={apolloKey} />)}
             {activeTab === "linkedin" && result.searches?.linkedin?.map((item, i) => <SearchCard key={i} item={item} platform="linkedin" apolloKey={apolloKey} />)}
           </Section>
