@@ -816,6 +816,7 @@ export default function ProspectCrafter() {
   });
 
   const [copiedPackage, setCopiedPackage] = useState(false);
+  const [copiedEmailFold, setCopiedEmailFold] = useState(false);
   const dropdownRef = useRef(null);
   const streamRef = useRef(null);
   const abortRef = useRef(null);
@@ -1743,6 +1744,38 @@ Build me a full prospecting intelligence package for this target.`;
               }}
             >
               {copiedPackage ? "✓ Package Copied" : "→ EventFold (Full Package)"}
+            </button>
+            <button
+              onClick={async () => {
+                const payload = JSON.stringify({
+                  __emailfold: true,
+                  naicsCode,
+                  naicsLabel,
+                  summary: result.summary,
+                  angles: result.angles || [],
+                  signals: result.icp?.signals || [],
+                  qualifying_criteria: result.icp?.qualifying_criteria || [],
+                  red_flags: result.red_flags || [],
+                });
+                await navigator.clipboard.writeText(payload);
+                setCopiedEmailFold(true);
+                setTimeout(() => setCopiedEmailFold(false), 2000);
+              }}
+              style={{
+                background: copiedEmailFold ? T.greenBg : T.violetBg,
+                border: `1px solid ${copiedEmailFold ? T.greenBorder : T.violetBorder}`,
+                color: copiedEmailFold ? T.green : T.violet,
+                borderRadius: T.radiusSm,
+                padding: "6px 14px",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                fontFamily: "inherit",
+                transition: "all 0.15s",
+                letterSpacing: "0.03em",
+              }}
+            >
+              {copiedEmailFold ? "✓ Copied for EmailFold" : "✉ → EmailFold"}
             </button>
           </div>
 
