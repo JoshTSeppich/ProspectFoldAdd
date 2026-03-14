@@ -283,6 +283,58 @@ function getContactedInfo(email) {
   return data[email.toLowerCase()] || null;
 }
 
+// ─── Pipeline storage (FF-19) ─────────────────────────────────────────────────
+const PIPELINE_KEY = "ff_pipeline_v1";
+
+function loadPipeline() {
+  try { return JSON.parse(localStorage.getItem(PIPELINE_KEY) || "{}"); } catch { return {}; }
+}
+function savePipeline(data) {
+  localStorage.setItem(PIPELINE_KEY, JSON.stringify(data));
+}
+function upsertPipelineCard(card) {
+  const data = loadPipeline();
+  data[card.id] = { ...card, lastActivity: Date.now() };
+  savePipeline(data);
+  return data;
+}
+function deletePipelineCard(id) {
+  const data = loadPipeline();
+  delete data[id];
+  savePipeline(data);
+  return data;
+}
+function pipelineCardFromContact(contact) {
+  const id = `pc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  return {
+    id,
+    name:         contact.name    || "",
+    email:        (contact.email  || "").toLowerCase(),
+    company:      contact.company || "",
+    title:        contact.title   || "",
+    stage:        "identified",
+    notes:        "",
+    addedAt:      Date.now(),
+    lastActivity: Date.now(),
+  };
+}
+
+// ─── Sequences storage (FF-20) ────────────────────────────────────────────────
+const SEQUENCES_KEY = "ff_sequences_v1";
+
+function loadSequences() {
+  try { return JSON.parse(localStorage.getItem(SEQUENCES_KEY) || "{}"); } catch { return {}; }
+}
+function saveSequences(data) {
+  localStorage.setItem(SEQUENCES_KEY, JSON.stringify(data));
+}
+function upsertSequenceRecord(record) {
+  const data = loadSequences();
+  data[record.id] = { ...record, lastActivity: Date.now() };
+  saveSequences(data);
+  return data;
+}
+
 // ─── Saved runs storage ───────────────────────────────────────────────────────
 const RUNS_KEY = "ff_saved_runs";
 const MAX_RUNS = 10;
@@ -625,7 +677,7 @@ function SendPreviewModal({ to, subject, body, onConfirm, onCancel, c }) {
   );
 }
 
-function ContactCard({ contact, checklist, targetTitles, onDraftOutreach, c }) {
+function ContactCard({ contact, checklist, targetTitles, onDraftOutreach, onAddToPipeline, c }) {
   const initials = (contact.name || "?").split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
   const checks   = checklist?.length ? runQualChecks(contact, checklist, targetTitles) : [];
   const score    = fitScore(checks);
@@ -689,16 +741,27 @@ function ContactCard({ contact, checklist, targetTitles, onDraftOutreach, c }) {
         )}
       </div>
 
-      {/* Draft Outreach button */}
-      {onDraftOutreach && (
-        <div style={{ marginTop:10, display:"flex", justifyContent:"flex-end" }}>
-          <button
-            onClick={() => onDraftOutreach(contact)}
-            style={{ padding:"4px 12px", borderRadius:6, border:`1px solid ${c.green}44`, background:`${c.green}11`, color:c.green, fontSize:11, fontWeight:600, cursor:"pointer", transition:"all 0.15s" }}
-            onMouseEnter={e => { e.currentTarget.style.background = `${c.green}22`; e.currentTarget.style.borderColor = c.green; }}
-            onMouseLeave={e => { e.currentTarget.style.background = `${c.green}11`; e.currentTarget.style.borderColor = `${c.green}44`; }}>
-            Draft Outreach →
-          </button>
+      {/* Actions row */}
+      {(onDraftOutreach || onAddToPipeline) && (
+        <div style={{ marginTop:10, display:"flex", gap:6, justifyContent:"flex-end" }}>
+          {onAddToPipeline && (
+            <button
+              onClick={() => onAddToPipeline(contact)}
+              style={{ padding:"4px 12px", borderRadius:6, border:`1px solid ${c.accent}44`, background:`${c.accent}11`, color:c.accent, fontSize:11, fontWeight:600, cursor:"pointer", transition:"all 0.15s" }}
+              onMouseEnter={e => { e.currentTarget.style.background = `${c.accent}22`; e.currentTarget.style.borderColor = c.accent; }}
+              onMouseLeave={e => { e.currentTarget.style.background = `${c.accent}11`; e.currentTarget.style.borderColor = `${c.accent}44`; }}>
+              + Pipeline
+            </button>
+          )}
+          {onDraftOutreach && (
+            <button
+              onClick={() => onDraftOutreach(contact)}
+              style={{ padding:"4px 12px", borderRadius:6, border:`1px solid ${c.green}44`, background:`${c.green}11`, color:c.green, fontSize:11, fontWeight:600, cursor:"pointer", transition:"all 0.15s" }}
+              onMouseEnter={e => { e.currentTarget.style.background = `${c.green}22`; e.currentTarget.style.borderColor = c.green; }}
+              onMouseLeave={e => { e.currentTarget.style.background = `${c.green}11`; e.currentTarget.style.borderColor = `${c.green}44`; }}>
+              Draft Outreach →
+            </button>
+          )}
         </div>
       )}
 
@@ -1969,6 +2032,8 @@ function OutreachView({ c, apiKey, onOpenSettings, outreachBridge, onClearBridge
   const [paused,          setPaused]           = useState(false);
   // FF-18: send preview modal for sequence tracker
   const [seqPreview,      setSeqPreview]       = useState(null); // { step, variant } | null
+  // FF-20: id of the currently persisted sequence record
+  const [activeSeqId,     setActiveSeqId]      = useState(null);
   const autoCheckedRef = useRef(false);
   const [history,        setHistory]        = useState(() => {
     try { return JSON.parse(localStorage.getItem("ff_outreach_history") || "[]"); } catch { return []; }
@@ -2089,6 +2154,38 @@ ${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`
         }
       } catch { /* label application is non-fatal */ }
 
+      // FF-20: persist sequence record to localStorage
+      try {
+        const seqId = `seq_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const seqSteps = steps.map((step, i) => {
+          const d = results[i] || {};
+          return {
+            label:       step.label,
+            subject:     step.subject,
+            body:        step.body,
+            draftId:     d.draft_id   || null,
+            messageId:   d.message_id || null,
+            gmailUrl:    d.gmail_url  || null,
+            sentAt:      null,
+            threadId:    null,
+            scheduledAt: null,
+          };
+        });
+        const record = {
+          id:           seqId,
+          contactEmail: (contactEmail || "").toLowerCase(),
+          contactName:  contactName,
+          company,
+          createdAt:    Date.now(),
+          lastActivity: Date.now(),
+          status:       "active",
+          replyDetails: {},
+          steps:        seqSteps,
+        };
+        upsertSequenceRecord(record);
+        setActiveSeqId(seqId);
+      } catch { /* non-fatal */ }
+
     } catch (e) {
       setError(String(e));
     } finally {
@@ -2107,11 +2204,26 @@ ${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`
         subject: (variant.subjects || [])[0] || variant.label,
         body:    variant.body || "",
       });
+      const sentAt = Date.now();
       setSequenceSent(prev => ({
         ...prev,
-        [variant.label]: { ...result, sentAt: Date.now() },
+        [variant.label]: { ...result, sentAt },
       }));
       markContacted(contactEmail, company);
+      // FF-20: sync to localStorage sequence record
+      if (activeSeqId) {
+        try {
+          const seqs = loadSequences();
+          const stored = seqs[activeSeqId];
+          if (stored) {
+            const s = stored.steps.find(s => s.label === variant.label);
+            if (s) { s.sentAt = sentAt; s.threadId = result.thread_id || null; }
+            stored.status = stored.steps.every(s => s.sentAt) ? "complete" : "active";
+            stored.lastActivity = Date.now();
+            saveSequences(seqs);
+          }
+        } catch { /* non-fatal */ }
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -2138,7 +2250,22 @@ ${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`
     }
     setReplyStatus(prev => ({ ...prev, ...newStatus }));
     setReplyDetails(prev => ({ ...prev, ...newDetails }));
-    if (gotReply) setPaused(true);
+    if (gotReply) {
+      setPaused(true);
+      // FF-20: sync reply status to localStorage sequence record
+      if (activeSeqId) {
+        try {
+          const seqs = loadSequences();
+          const stored = seqs[activeSeqId];
+          if (stored) {
+            stored.replyDetails = { ...(stored.replyDetails || {}), ...newDetails };
+            stored.status = "replied";
+            stored.lastActivity = Date.now();
+            saveSequences(seqs);
+          }
+        } catch { /* non-fatal */ }
+      }
+    }
     setCheckingReplies(false);
   };
 
@@ -2159,6 +2286,7 @@ ${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`
     setSchedules({});
     setPaused(false);
     setSeqPreview(null);
+    setActiveSeqId(null);
     autoCheckedRef.current = false;
 
     const context = [
@@ -2699,6 +2827,448 @@ Return JSON array of integers only: [score1, score2, score3]`, 256);
   );
 }
 
+// ─── Pipeline Tab (FF-19) ────────────────────────────────────────────────────
+
+const PIPELINE_STAGES = [
+  { id: "identified", label: "Identified", color: "#7a8fa6" },
+  { id: "contacted",  label: "Contacted",  color: "#2d7ef7" },
+  { id: "replied",    label: "Replied",    color: "#f59e0b" },
+  { id: "meeting",    label: "Meeting",    color: "#22c55e" },
+  { id: "closed",     label: "Closed",     color: "#22c55e" },
+];
+
+function PipelineTabView({ c, onDraftOutreach }) {
+  const [pipeline, setPipeline] = useState(() => loadPipeline());
+  const [expandedId, setExpandedId] = useState(null);
+  const [draftNotes, setDraftNotes] = useState({});
+  const [importedOnce] = useState(() => {
+    if (localStorage.getItem("ff_pipeline_imported_v1")) return true;
+    // Auto-import from ff_contacted on first mount
+    const contacted = loadContacted();
+    const existing  = loadPipeline();
+    let changed = false;
+    for (const [email, info] of Object.entries(contacted)) {
+      const alreadyIn = Object.values(existing).some(card => card.email === email);
+      if (!alreadyIn) {
+        const id = `pc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        existing[id] = {
+          id, name: info.company ? `${email.split("@")[0]}` : email.split("@")[0],
+          email, company: info.company || "", title: "",
+          stage: "contacted", notes: "",
+          addedAt: info.contactedAt || Date.now(), lastActivity: info.contactedAt || Date.now(),
+        };
+        changed = true;
+      }
+    }
+    if (changed) { savePipeline(existing); }
+    localStorage.setItem("ff_pipeline_imported_v1", "1");
+    return true;
+  });
+
+  const cards = Object.values(pipeline).sort((a, b) => b.lastActivity - a.lastActivity);
+
+  const moveCard = (id, newStage) => {
+    setPipeline(prev => {
+      const updated = { ...prev, [id]: { ...prev[id], stage: newStage, lastActivity: Date.now() } };
+      savePipeline(updated);
+      return updated;
+    });
+  };
+
+  const saveNotes = (id) => {
+    const notes = draftNotes[id] ?? pipeline[id]?.notes ?? "";
+    setPipeline(prev => {
+      const updated = { ...prev, [id]: { ...prev[id], notes, lastActivity: Date.now() } };
+      savePipeline(updated);
+      return updated;
+    });
+  };
+
+  const removeCard = (id) => {
+    deletePipelineCard(id);
+    setPipeline(prev => { const u = { ...prev }; delete u[id]; return u; });
+    if (expandedId === id) setExpandedId(null);
+  };
+
+  const totalContacted = cards.filter(c => c.stage !== "identified").length;
+
+  return (
+    <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+      {/* Stats bar */}
+      <div style={{ display:"flex", gap:0, borderBottom:`1px solid ${c.border}`, flexShrink:0, background:c.surface }}>
+        {PIPELINE_STAGES.map((s, i) => {
+          const count = cards.filter(card => card.stage === s.id).length;
+          return (
+            <div key={s.id} style={{ flex:1, padding:"14px 0", textAlign:"center", borderRight: i < PIPELINE_STAGES.length - 1 ? `1px solid ${c.border}` : "none" }}>
+              <div style={{ fontSize:22, fontWeight:800, color: count > 0 ? s.color : c.textMuted }}>{count}</div>
+              <div style={{ fontSize:11, fontWeight:600, color:c.textSub, marginTop:2 }}>{s.label}</div>
+            </div>
+          );
+        })}
+        <div style={{ flex:1, padding:"14px 0", textAlign:"center" }}>
+          <div style={{ fontSize:22, fontWeight:800, color:c.text }}>{cards.length}</div>
+          <div style={{ fontSize:11, fontWeight:600, color:c.textSub, marginTop:2 }}>Total</div>
+        </div>
+      </div>
+
+      {/* Kanban board */}
+      {cards.length === 0 ? (
+        <div style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:12, color:c.textMuted }}>
+          <div style={{ fontSize:36 }}>◎</div>
+          <div style={{ fontSize:15, fontWeight:600, color:c.textSub }}>No prospects yet</div>
+          <div style={{ fontSize:13, color:c.textMuted, maxWidth:300, textAlign:"center" }}>
+            Click "+ Pipeline" on any contact card in Intel view to add them here.
+          </div>
+        </div>
+      ) : (
+        <div style={{ flex:1, display:"flex", overflow:"hidden" }}>
+          {PIPELINE_STAGES.map(stage => {
+            const stagecards = cards.filter(card => card.stage === stage.id);
+            return (
+              <div key={stage.id} style={{ flex:1, display:"flex", flexDirection:"column", borderRight:`1px solid ${c.border}`, overflow:"hidden" }}>
+                {/* Column header */}
+                <div style={{ padding:"10px 14px", borderBottom:`1px solid ${c.border}`, display:"flex", alignItems:"center", gap:8, flexShrink:0, background:c.surface }}>
+                  <div style={{ width:8, height:8, borderRadius:"50%", background:stage.color, flexShrink:0 }} />
+                  <span style={{ fontSize:12, fontWeight:700, color:c.text }}>{stage.label}</span>
+                  <span style={{ marginLeft:"auto", fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:10, background:`${stage.color}22`, color:stage.color }}>{stagecards.length}</span>
+                </div>
+
+                {/* Cards */}
+                <div style={{ flex:1, overflowY:"auto", padding:"8px 10px", display:"flex", flexDirection:"column", gap:6 }}>
+                  {stagecards.map(card => {
+                    const isExpanded = expandedId === card.id;
+                    const contactedInfo = getContactedInfo(card.email);
+                    return (
+                      <div key={card.id} style={{ borderRadius:10, border:`1px solid ${isExpanded ? stage.color + "88" : c.border}`, background: isExpanded ? c.card : c.bg, transition:"border-color 0.15s" }}>
+                        {/* Collapsed row */}
+                        <div onClick={() => setExpandedId(isExpanded ? null : card.id)}
+                          style={{ padding:"10px 12px", cursor:"pointer", display:"flex", alignItems:"center", gap:8 }}>
+                          <div style={{ width:30, height:30, borderRadius:"50%", background:`${stage.color}22`, color:stage.color, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, flexShrink:0 }}>
+                            {(card.name || "?").split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase()}
+                          </div>
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontSize:12, fontWeight:700, color:c.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{card.name || card.email}</div>
+                            <div style={{ fontSize:11, color:c.textSub, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{card.company}</div>
+                          </div>
+                          <span style={{ fontSize:9, color:c.textMuted, flexShrink:0 }}>{isExpanded ? "▲" : "▼"}</span>
+                        </div>
+
+                        {/* Expanded panel */}
+                        {isExpanded && (
+                          <div style={{ borderTop:`1px solid ${c.border}`, padding:"12px 12px" }}>
+                            {card.title && <div style={{ fontSize:11, color:c.textSub, marginBottom:8 }}>{card.title}</div>}
+                            {card.email && (
+                              <div style={{ fontSize:11, fontFamily:"monospace", color:c.textSub, marginBottom:8 }}>{card.email}
+                                {contactedInfo && <span style={{ marginLeft:6, color:c.green, fontSize:10 }}>· Contacted {formatRelativeTime(contactedInfo.contactedAt)}</span>}
+                              </div>
+                            )}
+
+                            {/* Stage selector */}
+                            <div style={{ marginBottom:10 }}>
+                              <div style={{ fontSize:10, fontWeight:700, color:c.textMuted, marginBottom:5, textTransform:"uppercase", letterSpacing:"0.06em" }}>Move to stage</div>
+                              <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+                                {PIPELINE_STAGES.map(s => (
+                                  <button key={s.id} onClick={() => moveCard(card.id, s.id)}
+                                    style={{ padding:"3px 8px", borderRadius:5, border:`1px solid ${card.stage === s.id ? s.color : c.border}`, background: card.stage === s.id ? `${s.color}22` : "transparent", color: card.stage === s.id ? s.color : c.textMuted, fontSize:10, fontWeight:600, cursor:"pointer" }}>
+                                    {s.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+
+                            {/* Notes */}
+                            <textarea
+                              value={draftNotes[card.id] ?? card.notes ?? ""}
+                              onChange={e => setDraftNotes(prev => ({ ...prev, [card.id]: e.target.value }))}
+                              onBlur={() => saveNotes(card.id)}
+                              placeholder="Add notes…"
+                              rows={3}
+                              style={{ width:"100%", padding:"7px 9px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:7, color:c.text, fontSize:11, resize:"vertical", outline:"none", boxSizing:"border-box", fontFamily:"inherit" }}
+                            />
+
+                            {/* Actions */}
+                            <div style={{ display:"flex", gap:6, marginTop:8 }}>
+                              <button onClick={() => onDraftOutreach(card)}
+                                style={{ flex:1, padding:"6px 0", borderRadius:7, border:`1px solid ${c.green}44`, background:`${c.green}11`, color:c.green, fontSize:11, fontWeight:600, cursor:"pointer" }}>
+                                Draft Outreach →
+                              </button>
+                              <button onClick={() => removeCard(card.id)}
+                                style={{ padding:"6px 10px", borderRadius:7, border:`1px solid ${c.red}44`, background:"transparent", color:c.red, fontSize:11, cursor:"pointer" }}>
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Sequences Tab (FF-20) ───────────────────────────────────────────────────
+
+const SEQ_STATUS_META = {
+  active:   { label: "Active",   color: "#2d7ef7" },
+  paused:   { label: "Paused",   color: "#f59e0b" },
+  replied:  { label: "Replied",  color: "#22c55e" },
+  complete: { label: "Complete", color: "#7a8fa6" },
+};
+
+function SequencesView({ c, gmailConnected, onOpenSettings }) {
+  const [sequences, setSequences] = useState(() =>
+    Object.values(loadSequences()).sort((a, b) => b.lastActivity - a.lastActivity)
+  );
+  const [expandedId,   setExpandedId]   = useState(null);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [checkingAll,  setCheckingAll]  = useState(false);
+  const [sendingStep,  setSendingStep]  = useState(null); // `${seqId}:${label}`
+  const [error,        setError]        = useState(null);
+
+  const refreshSeqs = () =>
+    setSequences(Object.values(loadSequences()).sort((a, b) => b.lastActivity - a.lastActivity));
+
+  const visible = statusFilter === "all"
+    ? sequences
+    : sequences.filter(s => s.status === statusFilter);
+
+  const handleSendStep = async (seqId, step) => {
+    const rec = sequences.find(s => s.id === seqId);
+    if (!rec || !rec.contactEmail || !gmailConnected) return;
+    setSendingStep(`${seqId}:${step.label}`);
+    setError(null);
+    try {
+      const result = await invoke("gmail_send_message", {
+        to: rec.contactEmail, subject: step.subject, body: step.body,
+      });
+      markContacted(rec.contactEmail, rec.company);
+      const seqs = loadSequences();
+      const stored = seqs[seqId];
+      if (stored) {
+        const s = stored.steps.find(s => s.label === step.label);
+        if (s) { s.sentAt = Date.now(); s.threadId = result.thread_id || null; }
+        const allSent = stored.steps.every(s => s.sentAt);
+        stored.status = allSent ? "complete" : "active";
+        stored.lastActivity = Date.now();
+        saveSequences(seqs);
+      }
+      refreshSeqs();
+    } catch (e) { setError(String(e)); }
+    setSendingStep(null);
+  };
+
+  const handleCheckAllReplies = async () => {
+    setCheckingAll(true);
+    setError(null);
+    const seqs = loadSequences();
+    for (const rec of Object.values(seqs)) {
+      if (rec.status !== "active" && rec.status !== "paused") continue;
+      for (const step of rec.steps) {
+        if (!step.threadId) continue;
+        try {
+          const detail = await invoke("gmail_check_reply_detail", { threadId: step.threadId });
+          if (detail.has_reply) {
+            rec.replyDetails = rec.replyDetails || {};
+            rec.replyDetails[step.label] = detail;
+            rec.status = "replied";
+            rec.lastActivity = Date.now();
+          }
+        } catch { /* non-fatal per step */ }
+      }
+    }
+    saveSequences(seqs);
+    refreshSeqs();
+    setCheckingAll(false);
+  };
+
+  const deleteSequence = (id) => {
+    const seqs = loadSequences();
+    delete seqs[id];
+    saveSequences(seqs);
+    refreshSeqs();
+    if (expandedId === id) setExpandedId(null);
+  };
+
+  const activeCount = sequences.filter(s => s.status === "active").length;
+
+  return (
+    <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+      {/* Header */}
+      <div style={{ padding:"14px 20px", borderBottom:`1px solid ${c.border}`, background:c.surface, flexShrink:0, display:"flex", alignItems:"center", gap:12 }}>
+        <div style={{ flex:1 }}>
+          <div style={{ fontSize:15, fontWeight:700, color:c.text }}>Active Sequences</div>
+          <div style={{ fontSize:12, color:c.textMuted, marginTop:2 }}>{sequences.length} total · {activeCount} active</div>
+        </div>
+        {!gmailConnected && (
+          <button onClick={onOpenSettings}
+            style={{ padding:"7px 14px", borderRadius:8, border:`1px solid ${c.accent}`, background:"transparent", color:c.accent, fontSize:12, fontWeight:600 }}>
+            Connect Gmail →
+          </button>
+        )}
+        {sequences.some(s => s.status === "active" || s.status === "paused") && gmailConnected && (
+          <button onClick={handleCheckAllReplies} disabled={checkingAll}
+            style={{ padding:"7px 14px", borderRadius:8, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:12, fontWeight:600, opacity: checkingAll ? 0.5 : 1 }}>
+            {checkingAll ? "Checking…" : "↻ Check All Replies"}
+          </button>
+        )}
+        {/* Status filter */}
+        <div style={{ display:"flex", gap:3, background:c.bg, borderRadius:8, padding:3, border:`1px solid ${c.border}` }}>
+          {[["all","All"], ["active","Active"], ["replied","Replied"], ["complete","Complete"]].map(([val, lbl]) => (
+            <button key={val} onClick={() => setStatusFilter(val)}
+              style={{ padding:"4px 10px", borderRadius:6, border:"none", fontSize:11, fontWeight:600, background: statusFilter === val ? c.accent : "transparent", color: statusFilter === val ? "#fff" : c.textSub, cursor:"pointer" }}>
+              {lbl}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {error && (
+        <div style={{ padding:"10px 20px", background:c.redDim, color:c.red, fontSize:12, borderBottom:`1px solid ${c.border}` }}>
+          {error}
+        </div>
+      )}
+
+      {/* List */}
+      {sequences.length === 0 ? (
+        <div style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:12, color:c.textMuted }}>
+          <div style={{ fontSize:36 }}>⟳</div>
+          <div style={{ fontSize:15, fontWeight:600, color:c.textSub }}>No sequences saved yet</div>
+          <div style={{ fontSize:13, color:c.textMuted, maxWidth:320, textAlign:"center" }}>
+            Go to Outreach → Sequence mode → generate a 4-step cadence → Save All to Gmail Drafts. It'll appear here automatically.
+          </div>
+        </div>
+      ) : (
+        <div style={{ flex:1, overflowY:"auto", padding:"12px 16px", display:"flex", flexDirection:"column", gap:8 }}>
+          {visible.map(seq => {
+            const isExpanded = expandedId === seq.id;
+            const sentCount  = seq.steps.filter(s => s.sentAt).length;
+            const meta       = SEQ_STATUS_META[seq.status] || SEQ_STATUS_META.active;
+            const hasAnyThread = seq.steps.some(s => s.threadId);
+
+            return (
+              <div key={seq.id} style={{ border:`1px solid ${isExpanded ? c.borderLight : c.border}`, borderRadius:12, background: isExpanded ? c.card : c.bg, transition:"border-color 0.15s" }}>
+                {/* Collapsed row */}
+                <div onClick={() => setExpandedId(isExpanded ? null : seq.id)}
+                  style={{ padding:"12px 16px", cursor:"pointer", display:"flex", alignItems:"center", gap:12 }}>
+                  {/* Avatar */}
+                  <div style={{ width:36, height:36, borderRadius:"50%", background:c.accentDim, color:c.accent, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, flexShrink:0 }}>
+                    {(seq.contactName || seq.contactEmail || "?").split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase()}
+                  </div>
+                  {/* Info */}
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:13, fontWeight:700, color:c.text }}>{seq.contactName || seq.contactEmail}</div>
+                    <div style={{ fontSize:11, color:c.textSub, marginTop:2 }}>
+                      {seq.company && <span>{seq.company} · </span>}
+                      {seq.contactEmail}
+                    </div>
+                  </div>
+                  {/* Progress + status */}
+                  <div style={{ display:"flex", alignItems:"center", gap:10, flexShrink:0 }}>
+                    {/* Step progress */}
+                    <div style={{ display:"flex", gap:3 }}>
+                      {seq.steps.map((step, i) => (
+                        <div key={i} style={{ width:18, height:6, borderRadius:3, background: step.sentAt ? c.green : seq.replyDetails?.[step.label]?.has_reply ? c.accent : c.border }} title={step.label} />
+                      ))}
+                    </div>
+                    <span style={{ fontSize:11, color:c.textMuted }}>{sentCount}/{seq.steps.length}</span>
+                    {/* Status badge */}
+                    <span style={{ fontSize:10, padding:"2px 8px", borderRadius:10, background:`${meta.color}22`, color:meta.color, fontWeight:700, border:`1px solid ${meta.color}44` }}>
+                      {meta.label}
+                    </span>
+                    {/* Reply badge */}
+                    {Object.keys(seq.replyDetails || {}).length > 0 && (
+                      <span style={{ fontSize:10, padding:"2px 8px", borderRadius:10, background:`${c.green}22`, color:c.green, fontWeight:700 }}>↩ Reply</span>
+                    )}
+                    <span style={{ fontSize:11, color:c.textMuted }}>{isExpanded ? "▲" : "▼"}</span>
+                  </div>
+                </div>
+
+                {/* Expanded: step tracker */}
+                {isExpanded && (
+                  <div style={{ borderTop:`1px solid ${c.border}`, padding:"12px 16px" }}>
+                    {/* Reply details */}
+                    {Object.entries(seq.replyDetails || {}).length > 0 && (
+                      <div style={{ marginBottom:10, padding:"8px 10px", background:c.bg, borderRadius:8, border:`1px solid ${c.border}` }}>
+                        {Object.entries(seq.replyDetails).map(([step, detail]) => (
+                          <div key={step} style={{ fontSize:11, color:c.textSub }}>
+                            <strong style={{ color: detail.is_unsubscribe ? c.red : c.accent }}>{step}</strong>
+                            {" — "}{detail.reply_subject ? `"${detail.reply_subject.slice(0, 70)}"` : "Reply received"}
+                            {detail.is_unsubscribe && <span style={{ marginLeft:4, color:c.red }}>· Unsubscribe</span>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* 4-step grid */}
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8, marginBottom:10 }}>
+                      {seq.steps.map(step => {
+                        const detail      = (seq.replyDetails || {})[step.label];
+                        const isUnsub     = detail?.is_unsubscribe;
+                        const isBeingSent = sendingStep === `${seq.id}:${step.label}`;
+                        return (
+                          <div key={step.label} style={{ padding:"10px 12px", borderRadius:10,
+                            border:`1px solid ${isUnsub ? c.red+"44" : step.sentAt ? c.green+"44" : c.border}`,
+                            background: isUnsub ? c.redDim : step.sentAt ? c.greenDim : c.surface }}>
+                            <div style={{ fontSize:11, fontWeight:700, color: isUnsub ? c.red : step.sentAt ? c.green : c.text, marginBottom:5 }}>
+                              {step.label}
+                              {isUnsub && <span style={{ marginLeft:5, fontSize:9, padding:"1px 5px", borderRadius:3, background:`${c.red}22`, color:c.red }}>⛔</span>}
+                              {detail?.has_reply && !isUnsub && <span style={{ marginLeft:5, fontSize:9, padding:"1px 5px", borderRadius:3, background:`${c.accent}22`, color:c.accent }}>↩</span>}
+                            </div>
+                            {step.sentAt ? (
+                              <div style={{ fontSize:10, color: isUnsub ? c.red : c.green }}>
+                                ✓ {formatRelativeTime(step.sentAt)}
+                              </div>
+                            ) : (
+                              <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                                {step.gmailUrl && (
+                                  <button onClick={() => invoke("open_url", { url: step.gmailUrl })}
+                                    style={{ width:"100%", padding:"5px 0", borderRadius:6, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:10, fontWeight:600, cursor:"pointer" }}
+                                    onMouseEnter={e => { e.currentTarget.style.borderColor = c.accent; e.currentTarget.style.color = c.accent; }}
+                                    onMouseLeave={e => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.color = c.textSub; }}>
+                                    Open Draft →
+                                  </button>
+                                )}
+                                {seq.contactEmail && gmailConnected && (
+                                  <button onClick={() => handleSendStep(seq.id, step)} disabled={isBeingSent}
+                                    style={{ width:"100%", padding:"5px 0", borderRadius:6, border:"none", background:c.accent, color:"#fff", fontSize:10, fontWeight:700, opacity: isBeingSent ? 0.5 : 1, cursor:"pointer" }}>
+                                    {isBeingSent ? "Sending…" : "Send Now"}
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Actions row */}
+                    <div style={{ display:"flex", justifyContent:"flex-end", gap:8 }}>
+                      <div style={{ fontSize:11, color:c.textMuted, alignSelf:"center" }}>
+                        Started {formatRelativeTime(seq.createdAt)}
+                      </div>
+                      <div style={{ flex:1 }} />
+                      <button onClick={() => deleteSequence(seq.id)}
+                        style={{ padding:"5px 12px", borderRadius:7, border:`1px solid ${c.red}44`, background:"transparent", color:c.red, fontSize:11, cursor:"pointer" }}>
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -2708,6 +3278,7 @@ export default function App() {
   const [anthropicKey, setAnthropicKey] = useState(() => localStorage.getItem("ff_anthropic_key") || "");
   const [apolloKey,    setApolloKey]    = useState("");
   const [gmailConnected, setGmailConnected] = useState(null); // null | email string
+  const [pipelineToast,  setPipelineToast]  = useState(null); // contact name string for 2s
   const [bridgeContext,   setBridgeContext]   = useState(null); // { companyName, notes }
   const [outreachBridge,  setOutreachBridge]  = useState(null); // { contactName, contactTitle, company, intelContext }
   const [showSettings, setShowSettings] = useState(false);
@@ -2750,6 +3321,18 @@ export default function App() {
     setQueryLog([]); setPipelineLog([]); setError(null); setDone(false);
     setBridgeContext(null);
     setOutreachBridge(null);
+  };
+
+  const handleAddToPipeline = (contact) => {
+    const data = loadPipeline();
+    const emailLower = (contact.email || "").toLowerCase();
+    const alreadyIn = Object.values(data).some(card => card.email === emailLower);
+    if (!alreadyIn) {
+      const card = pipelineCardFromContact(contact);
+      upsertPipelineCard(card);
+    }
+    setPipelineToast(contact.name || contact.email || "Contact");
+    setTimeout(() => setPipelineToast(null), 2000);
   };
 
   const addLog = useCallback((stage, label, data) => {
@@ -3137,7 +3720,7 @@ Return JSON:
             <div style={{ width:28, height:28, borderRadius:8, background:c.accentDim, display:"flex", alignItems:"center", justifyContent:"center" }}><span style={{ fontSize:14 }}>✉</span></div>
             <span style={{ fontWeight:700, fontSize:15, letterSpacing:"-0.02em", color:c.text }}>FinalFold</span>
             <div style={{ display:"flex", gap:2, marginLeft:12, background:c.bg, borderRadius:8, padding:3, border:`1px solid ${c.border}`, WebkitAppRegion:"no-drag" }}>
-              {[["intel","Intel"], ["feature_request","Feature Requests"], ["outreach","Outreach"]].map(([val, lbl]) => (
+              {[["intel","Intel"], ["feature_request","Feature Requests"], ["outreach","Outreach"], ["pipeline","Pipeline"], ["sequences","Sequences"]].map(([val, lbl]) => (
                 <button key={val} onClick={() => setView(val)}
                   style={{ padding:"4px 12px", borderRadius:6, border:"none", fontSize:12, fontWeight:600, background: view === val ? c.accent : "transparent", color: view === val ? "#fff" : c.textSub, transition:"all 0.15s", cursor:"pointer" }}>
                   {lbl}
@@ -3167,6 +3750,19 @@ Return JSON:
             <OutreachView c={c} apiKey={anthropicKey} onOpenSettings={() => setShowSettings(true)}
               outreachBridge={outreachBridge} onClearBridge={() => setOutreachBridge(null)}
               gmailConnected={gmailConnected} onGmailConnectedChange={setGmailConnected} />
+          )}
+
+          {view === "pipeline" && (
+            <PipelineTabView c={c}
+              onDraftOutreach={(card) => {
+                setOutreachBridge({ contactName: card.name, contactTitle: card.title, company: card.company, contactEmail: card.email, intelContext: "" });
+                setView("outreach");
+              }}
+            />
+          )}
+
+          {view === "sequences" && (
+            <SequencesView c={c} gmailConnected={gmailConnected} onOpenSettings={() => setShowSettings(true)} />
           )}
 
           {/* Intel view */}
@@ -3310,7 +3906,9 @@ Return JSON:
                         onDraftOutreach={(ct) => {
                           setOutreachBridge({ contactName: ct.name, contactTitle: ct.title, company: ct.company, contactEmail: ct.email || "", intelContext: markdown });
                           setView("outreach");
-                        }} />
+                        }}
+                        onAddToPipeline={handleAddToPipeline}
+                      />
                     ))}
                   </div>
                 ) : (
@@ -3323,6 +3921,14 @@ Return JSON:
 
         </div>
       </div>
+
+      {/* Pipeline toast (FF-19) */}
+      {pipelineToast && (
+        <div style={{ position:"fixed", bottom:24, right:24, padding:"10px 18px", background:c.accent, color:"#fff", borderRadius:10, fontSize:12, fontWeight:700, zIndex:9999, boxShadow:"0 4px 20px rgba(0,0,0,0.35)", display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ fontSize:14 }}>✓</span>
+          {pipelineToast} added to Pipeline
+        </div>
+      )}
     </>
   );
 }
