@@ -71,6 +71,7 @@ function buildOutreachBridge(contacts, markdown) {
     contactName:  first.name    || "",
     contactTitle: first.title   || "",
     company:      first.company || "",
+    contactEmail: first.email   || "",
     intelContext: markdown.slice(0, 4000),
   };
 }
@@ -1571,7 +1572,7 @@ const OUTREACH_STAGES = [
   { id: "haiku2", label: "Score Variants",  model: "Haiku",  icon: "⚡" },
 ];
 
-function VariantCard({ variant, spamHits, onChange, c }) {
+function VariantCard({ variant, spamHits, contactEmail, onChange, c }) {
   const [copiedSubj,  setCopiedSubj]  = useState(null);
   const [copiedBody,  setCopiedBody]  = useState(false);
   const [copiedEmail, setCopiedEmail] = useState(false);
@@ -1582,6 +1583,20 @@ function VariantCard({ variant, spamHits, onChange, c }) {
     const subj = variant.subjects?.[0];
     const text = subj ? `Subject: ${subj}\n\n${variant.body || ""}` : variant.body || "";
     navigator.clipboard.writeText(text).then(() => { setCopiedEmail(true); setTimeout(() => setCopiedEmail(false), 1800); });
+  };
+
+  const openInMail = () => {
+    const subj = encodeURIComponent(variant.subjects?.[0] || "");
+    const body = encodeURIComponent(variant.body || "");
+    const to   = encodeURIComponent(contactEmail || "");
+    invoke("open_url", { url: `mailto:${to}?subject=${subj}&body=${body}` });
+  };
+
+  const openInGmail = () => {
+    const su   = encodeURIComponent(variant.subjects?.[0] || "");
+    const body = encodeURIComponent(variant.body || "");
+    const to   = encodeURIComponent(contactEmail || "");
+    invoke("open_url", { url: `https://mail.google.com/mail/?view=cm&to=${to}&su=${su}&body=${body}` });
   };
 
   return (
@@ -1646,6 +1661,25 @@ function VariantCard({ variant, spamHits, onChange, c }) {
             ⚠ {spamHits.length} spam word{spamHits.length > 1 ? "s" : ""}: {spamHits.join(", ")}
           </div>
         )}
+
+        {/* Send buttons — email variants only */}
+        {!isLinkedIn && (
+          <div style={{ marginTop:12, display:"flex", gap:8 }}>
+            <button onClick={openInMail}
+              style={{ flex:1, padding:"9px 0", borderRadius:8, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:12, fontWeight:600, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = c.accent; e.currentTarget.style.color = c.accent; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.color = c.textSub; }}>
+              ✉ Open in Mail
+            </button>
+            <button onClick={openInGmail}
+              style={{ flex:1, padding:"9px 0", borderRadius:8, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:12, fontWeight:600, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = "#ea4335"; e.currentTarget.style.color = "#ea4335"; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.color = c.textSub; }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.910 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"/></svg>
+              Open in Gmail
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1655,6 +1689,7 @@ function OutreachView({ c, apiKey, onOpenSettings, outreachBridge, onClearBridge
   const [stStates,       setStStates]       = useState({});
   const [contactName,    setContactName]    = useState("");
   const [contactTitle,   setContactTitle]   = useState("");
+  const [contactEmail,   setContactEmail]   = useState("");
   const [company,        setCompany]        = useState("");
   const [intelCtx,       setIntelCtx]       = useState("");
   const [tone,           setTone]           = useState("direct");
@@ -1694,6 +1729,7 @@ function OutreachView({ c, apiKey, onOpenSettings, outreachBridge, onClearBridge
     if (!outreachBridge) return;
     setContactName(outreachBridge.contactName || "");
     setContactTitle(outreachBridge.contactTitle || "");
+    setContactEmail(outreachBridge.contactEmail || "");
     setCompany(outreachBridge.company || "");
     setIntelCtx(outreachBridge.intelContext || "");
   }, [outreachBridge]);
@@ -1905,7 +1941,7 @@ Return JSON array of integers only: [score1, score2, score3]`, 256);
               Context from Intel run for <strong>{outreachBridge.company}</strong>
             </span>
             <button
-              onClick={() => { onClearBridge(); setContactName(""); setContactTitle(""); setCompany(""); setIntelCtx(""); }}
+              onClick={() => { onClearBridge(); setContactName(""); setContactTitle(""); setContactEmail(""); setCompany(""); setIntelCtx(""); }}
               style={{ fontSize:12, color:c.accent, background:"none", border:"none", padding:"0 4px", cursor:"pointer", lineHeight:1 }}>
               ×
             </button>
@@ -1925,6 +1961,9 @@ Return JSON array of integers only: [score1, score2, score3]`, 256);
             <input type="text" value={company} onChange={e => setCompany(e.target.value)}
               placeholder="Company (required)"
               style={{ width:"100%", padding:"8px 10px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:12, outline:"none" }} />
+            <input type="email" value={contactEmail} onChange={e => setContactEmail(e.target.value)}
+              placeholder="Email (optional — enables Send buttons)"
+              style={{ width:"100%", padding:"8px 10px", background:c.bg, border:`1px solid ${contactEmail ? c.green + "66" : c.border}`, borderRadius:8, color:c.text, fontSize:12, outline:"none", fontFamily:"monospace" }} />
           </div>
 
           {/* Intel context */}
@@ -2093,6 +2132,7 @@ Return JSON array of integers only: [score1, score2, score3]`, 256);
                 <VariantCard
                   variant={editedVariants[activeIdx]}
                   spamHits={scanSpam(editedVariants[activeIdx].body || "")}
+                  contactEmail={contactEmail}
                   onChange={(field, val) => setEditedVariants(prev => prev.map((v, i) => i === activeIdx ? { ...v, [field]: val } : v))}
                   c={c}
                 />
@@ -2706,7 +2746,7 @@ Return JSON:
                       <ContactCard key={contact.id} contact={contact}
                         checklist={checklist} targetTitles={targetTitles} c={c}
                         onDraftOutreach={(ct) => {
-                          setOutreachBridge({ contactName: ct.name, contactTitle: ct.title, company: ct.company, intelContext: markdown });
+                          setOutreachBridge({ contactName: ct.name, contactTitle: ct.title, company: ct.company, contactEmail: ct.email || "", intelContext: markdown });
                           setView("outreach");
                         }} />
                     ))}
