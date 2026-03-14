@@ -335,6 +335,30 @@ function upsertSequenceRecord(record) {
   return data;
 }
 
+// ─── Template storage (FF-21) ─────────────────────────────────────────────────
+const TEMPLATES_KEY = "ff_templates_v1";
+
+function loadTemplates() {
+  try { return JSON.parse(localStorage.getItem(TEMPLATES_KEY) || "{}"); } catch { return {}; }
+}
+function saveTemplates(data) {
+  localStorage.setItem(TEMPLATES_KEY, JSON.stringify(data));
+}
+function upsertTemplate(tpl) {
+  const data = loadTemplates();
+  data[tpl.id] = tpl;
+  saveTemplates(data);
+}
+function deleteTemplate(id) {
+  const data = loadTemplates();
+  delete data[id];
+  saveTemplates(data);
+}
+function incrementTemplateUse(id) {
+  const data = loadTemplates();
+  if (data[id]) { data[id].useCount = (data[id].useCount || 0) + 1; saveTemplates(data); }
+}
+
 // ─── Saved runs storage ───────────────────────────────────────────────────────
 const RUNS_KEY = "ff_saved_runs";
 const MAX_RUNS = 10;
@@ -1800,7 +1824,11 @@ function VariantCard({ variant, spamHits, contactEmail, contactCompany, gmailCon
   const [sending,      setSending]      = useState(false);
   const [gmailError,   setGmailError]   = useState(null);
   // Send preview modal (FF-18)
-  const [previewOpen,  setPreviewOpen]  = useState(false);
+  const [previewOpen,   setPreviewOpen]  = useState(false);
+  // Template save (FF-21)
+  const [savingTpl,     setSavingTpl]    = useState(false);
+  const [tplName,       setTplName]      = useState("");
+  const [tplSaved,      setTplSaved]     = useState(false);
 
   const wordCount = (variant.body || "").trim().split(/\s+/).filter(Boolean).length;
   const isLinkedIn = variant.label === "LinkedIn";
@@ -1905,6 +1933,50 @@ function VariantCard({ variant, spamHits, contactEmail, contactCompany, gmailCon
               style={{ padding:"5px 12px", borderRadius:6, border:`1px solid ${copiedBody ? c.green : c.border}`, background: copiedBody ? c.greenDim : "transparent", color: copiedBody ? c.green : c.textSub, fontSize:11, fontWeight:600, cursor:"pointer", transition:"all 0.15s" }}>
               {copiedBody ? "✓ Copied" : isLinkedIn ? "Copy" : "Copy Body"}
             </button>
+            {/* ★ Save as Template (FF-21) */}
+            {tplSaved ? (
+              <span style={{ fontSize:11, color:c.green, fontWeight:600 }}>★ Saved!</span>
+            ) : savingTpl ? (
+              <div style={{ display:"flex", gap:4, alignItems:"center" }}>
+                <input
+                  autoFocus
+                  value={tplName}
+                  onChange={e => setTplName(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === "Enter" && tplName.trim()) {
+                      const id = `tpl_${Date.now()}`;
+                      upsertTemplate({ id, name: tplName.trim(), label: variant.label, subjects: variant.subjects || [], body: variant.body || "", savedAt: Date.now(), useCount: 0 });
+                      setTplSaved(true); setSavingTpl(false); setTplName("");
+                      setTimeout(() => setTplSaved(false), 3000);
+                    }
+                    if (e.key === "Escape") { setSavingTpl(false); setTplName(""); }
+                  }}
+                  placeholder="Template name…"
+                  style={{ padding:"4px 8px", borderRadius:6, border:`1px solid ${c.accent}66`, background:c.bg, color:c.text, fontSize:11, outline:"none", width:120 }}
+                />
+                <button
+                  onClick={() => {
+                    if (!tplName.trim()) return;
+                    const id = `tpl_${Date.now()}`;
+                    upsertTemplate({ id, name: tplName.trim(), label: variant.label, subjects: variant.subjects || [], body: variant.body || "", savedAt: Date.now(), useCount: 0 });
+                    setTplSaved(true); setSavingTpl(false); setTplName("");
+                    setTimeout(() => setTplSaved(false), 3000);
+                  }}
+                  style={{ padding:"4px 8px", borderRadius:6, border:"none", background:c.accent, color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer" }}>
+                  Save
+                </button>
+                <button onClick={() => { setSavingTpl(false); setTplName(""); }}
+                  style={{ padding:"4px 6px", borderRadius:6, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:11, cursor:"pointer" }}>
+                  ×
+                </button>
+              </div>
+            ) : (
+              <button onClick={() => setSavingTpl(true)}
+                style={{ padding:"5px 10px", borderRadius:6, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:11, fontWeight:600, cursor:"pointer" }}
+                title="Save as reusable template">
+                ★ Save
+              </button>
+            )}
           </div>
         </div>
         <textarea
@@ -2034,6 +2106,9 @@ function OutreachView({ c, apiKey, onOpenSettings, outreachBridge, onClearBridge
   const [seqPreview,      setSeqPreview]       = useState(null); // { step, variant } | null
   // FF-20: id of the currently persisted sequence record
   const [activeSeqId,     setActiveSeqId]      = useState(null);
+  // FF-21: template picker
+  const [showTplPicker,  setShowTplPicker]  = useState(false);
+  const [tplList,        setTplList]        = useState(() => Object.values(loadTemplates()));
   const autoCheckedRef = useRef(false);
   const [history,        setHistory]        = useState(() => {
     try { return JSON.parse(localStorage.getItem("ff_outreach_history") || "[]"); } catch { return []; }
@@ -2521,6 +2596,51 @@ Return JSON array of integers only: [score1, score2, score3]`, 256);
               ))}
             </div>
           </div>
+
+          {/* FF-21: Templates picker */}
+          {tplList.length > 0 && (
+            <div style={{ marginTop:12 }}>
+              <button
+                onClick={() => { setShowTplPicker(v => !v); setTplList(Object.values(loadTemplates())); }}
+                style={{ width:"100%", padding:"7px 10px", borderRadius:8, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:11, fontWeight:600, display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer" }}>
+                <span>★ Load Template</span>
+                <span style={{ opacity:0.5 }}>{showTplPicker ? "▲" : "▼"}</span>
+              </button>
+              {showTplPicker && (
+                <div style={{ marginTop:4, border:`1px solid ${c.border}`, borderRadius:8, overflow:"hidden", background:c.bg }}>
+                  {tplList.length === 0 ? (
+                    <div style={{ padding:"10px 12px", fontSize:11, color:c.textMuted }}>No saved templates yet.</div>
+                  ) : tplList.sort((a,b) => (b.savedAt||0) - (a.savedAt||0)).map(tpl => (
+                    <div key={tpl.id} style={{ padding:"8px 12px", borderBottom:`1px solid ${c.border}`, display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:12, fontWeight:600, color:c.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{tpl.name}</div>
+                        <div style={{ fontSize:10, color:c.textMuted }}>{tpl.label} · used {tpl.useCount||0}×</div>
+                      </div>
+                      <div style={{ display:"flex", gap:4, flexShrink:0 }}>
+                        <button
+                          onClick={() => {
+                            // Pre-fill intelCtx with a note about the template; real body comes after generate
+                            if (tpl.body) setIntelCtx(prev => prev ? prev : `[Template: ${tpl.name}]\n${tpl.body}`);
+                            incrementTemplateUse(tpl.id);
+                            setTplList(Object.values(loadTemplates()));
+                            setShowTplPicker(false);
+                          }}
+                          style={{ padding:"4px 8px", borderRadius:6, border:"none", background:c.accent, color:"#fff", fontSize:10, fontWeight:700, cursor:"pointer" }}>
+                          Use
+                        </button>
+                        <button
+                          onClick={() => { deleteTemplate(tpl.id); setTplList(Object.values(loadTemplates())); }}
+                          style={{ padding:"4px 6px", borderRadius:6, border:`1px solid ${c.border}`, background:"transparent", color:c.textMuted, fontSize:10, cursor:"pointer" }}
+                          title="Delete template">
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           <button onClick={handleGenerate} disabled={!canGenerate}
             style={{ marginTop:16, width:"100%", padding:"12px 0", borderRadius:10, border:"none", background:c.accent, color:"#fff", fontSize:14, fontWeight:700, opacity: canGenerate ? 1 : 0.45, transition:"opacity 0.15s", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
@@ -3269,6 +3389,175 @@ function SequencesView({ c, gmailConnected, onOpenSettings }) {
   );
 }
 
+// ─── Dashboard (FF-22) ────────────────────────────────────────────────────────
+
+function DashboardView({ c }) {
+  const contacted   = Object.values(loadContacted());
+  const pipeline    = Object.values(loadPipeline());
+  const sequences   = Object.values(loadSequences());
+  const templates   = Object.values(loadTemplates());
+
+  const now = Date.now();
+  const oneWeek = 7 * 24 * 60 * 60 * 1000;
+
+  // Contacted this week
+  const contactedThisWeek = contacted.filter(c => now - (c.contactedAt||0) < oneWeek).length;
+
+  // Pipeline by stage
+  const STAGES = ["identified","contacted","replied","meeting","closed"];
+  const STAGE_LABELS = { identified:"Identified", contacted:"Contacted", replied:"Replied", meeting:"Meeting", closed:"Closed" };
+  const STAGE_COLORS = { identified:c.accent, contacted:"#f59e0b", replied:"#8b5cf6", meeting:"#10b981", closed:c.green };
+  const byStage = STAGES.reduce((acc, s) => { acc[s] = pipeline.filter(p => p.stage === s).length; return acc; }, {});
+  const pipelineTotal = pipeline.length;
+
+  // Sequence stats
+  const seqActive  = sequences.filter(s => s.status === "active").length;
+  const seqPaused  = sequences.filter(s => s.status === "paused").length;
+  const seqReplied = sequences.filter(s => s.status === "replied").length;
+  const seqTotal   = sequences.length;
+  const replyRate  = seqTotal > 0 ? Math.round((seqReplied / seqTotal) * 100) : 0;
+
+  // Recent activity (last 10 items across all stores, sorted by time)
+  const activityItems = [
+    ...contacted.map(c => ({ ts: c.contactedAt||0, text: `Contacted ${c.company || "someone"}`, icon:"✉", color: "#8b5cf6" })),
+    ...pipeline.map(p => ({ ts: p.addedAt||0, text: `Added ${p.name||p.company} to Pipeline`, icon:"→", color: c.accent })),
+    ...pipeline.filter(p => p.lastActivity !== p.addedAt).map(p => ({ ts: p.lastActivity||0, text: `Pipeline: ${p.name||p.company} → ${STAGE_LABELS[p.stage]}`, icon:"↑", color: STAGE_COLORS[p.stage] || c.accent })),
+    ...sequences.map(s => ({ ts: s.createdAt||0, text: `Sequence started for ${s.contactName||s.contactEmail||"contact"}`, icon:"⚡", color:"#f59e0b" })),
+  ].sort((a,b) => b.ts - a.ts).slice(0, 12);
+
+  const StatCard = ({ label, value, sub, color }) => (
+    <div style={{ background:c.surface, border:`1px solid ${c.border}`, borderRadius:12, padding:"16px 20px", display:"flex", flexDirection:"column", gap:4 }}>
+      <div style={{ fontSize:11, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase" }}>{label}</div>
+      <div style={{ fontSize:28, fontWeight:800, color: color || c.text, letterSpacing:"-0.02em" }}>{value}</div>
+      {sub && <div style={{ fontSize:11, color:c.textMuted }}>{sub}</div>}
+    </div>
+  );
+
+  return (
+    <div style={{ flex:1, overflow:"auto", padding:24, display:"flex", flexDirection:"column", gap:20 }}>
+
+      {/* Header */}
+      <div>
+        <div style={{ fontSize:20, fontWeight:800, color:c.text, letterSpacing:"-0.02em" }}>Dashboard</div>
+        <div style={{ fontSize:12, color:c.textMuted, marginTop:2 }}>
+          {new Date().toLocaleDateString("en-US", { weekday:"long", month:"long", day:"numeric" })}
+        </div>
+      </div>
+
+      {/* Top KPI row */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:12 }}>
+        <StatCard label="Contacted This Week" value={contactedThisWeek} sub={`${contacted.length} total`} color={c.accent} />
+        <StatCard label="In Pipeline" value={pipelineTotal} sub={`${byStage.meeting||0} in meeting`} color="#10b981" />
+        <StatCard label="Active Sequences" value={seqActive} sub={`${seqPaused} paused`} color="#f59e0b" />
+        <StatCard label="Reply Rate" value={`${replyRate}%`} sub={`${seqReplied} of ${seqTotal} replied`} color="#8b5cf6" />
+      </div>
+
+      {/* Pipeline funnel + Sequence breakdown */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+
+        {/* Pipeline Funnel */}
+        <div style={{ background:c.surface, border:`1px solid ${c.border}`, borderRadius:12, padding:"16px 20px" }}>
+          <div style={{ fontSize:13, fontWeight:700, color:c.text, marginBottom:14 }}>Pipeline Funnel</div>
+          {pipelineTotal === 0 ? (
+            <div style={{ textAlign:"center", padding:"20px 0", color:c.textMuted, fontSize:12 }}>No pipeline cards yet. Add contacts from Intel.</div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+              {STAGES.map(stage => {
+                const count = byStage[stage] || 0;
+                const pct   = pipelineTotal > 0 ? Math.round((count / pipelineTotal) * 100) : 0;
+                return (
+                  <div key={stage}>
+                    <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
+                      <span style={{ fontSize:11, fontWeight:600, color:c.textSub }}>{STAGE_LABELS[stage]}</span>
+                      <span style={{ fontSize:11, color:c.textMuted }}>{count}</span>
+                    </div>
+                    <div style={{ height:6, borderRadius:4, background:c.bg, overflow:"hidden" }}>
+                      <div style={{ height:"100%", width:`${pct}%`, background: STAGE_COLORS[stage], borderRadius:4, transition:"width 0.4s ease" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Sequence Breakdown */}
+        <div style={{ background:c.surface, border:`1px solid ${c.border}`, borderRadius:12, padding:"16px 20px" }}>
+          <div style={{ fontSize:13, fontWeight:700, color:c.text, marginBottom:14 }}>Sequence Health</div>
+          {seqTotal === 0 ? (
+            <div style={{ textAlign:"center", padding:"20px 0", color:c.textMuted, fontSize:12 }}>No sequences yet. Start one in Outreach.</div>
+          ) : (
+            <>
+              <div style={{ display:"flex", gap:8, marginBottom:16 }}>
+                {[["Active", seqActive, "#f59e0b"],["Paused", seqPaused, c.amber],["Replied", seqReplied, c.green]].map(([lbl, val, col]) => (
+                  <div key={lbl} style={{ flex:1, background:c.bg, borderRadius:8, padding:"10px 12px", textAlign:"center", border:`1px solid ${c.border}` }}>
+                    <div style={{ fontSize:20, fontWeight:800, color:col }}>{val}</div>
+                    <div style={{ fontSize:10, color:c.textMuted, marginTop:2 }}>{lbl}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                <div style={{ fontSize:11, color:c.textMuted, flexShrink:0 }}>Reply rate</div>
+                <div style={{ flex:1, height:8, borderRadius:4, background:c.bg, overflow:"hidden" }}>
+                  <div style={{ height:"100%", width:`${replyRate}%`, background:`linear-gradient(90deg, #8b5cf6, #10b981)`, borderRadius:4, transition:"width 0.4s ease" }} />
+                </div>
+                <div style={{ fontSize:12, fontWeight:700, color:c.text, flexShrink:0 }}>{replyRate}%</div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Templates + Recent Activity */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 2fr", gap:12 }}>
+
+        {/* Templates */}
+        <div style={{ background:c.surface, border:`1px solid ${c.border}`, borderRadius:12, padding:"16px 20px" }}>
+          <div style={{ fontSize:13, fontWeight:700, color:c.text, marginBottom:12 }}>Saved Templates</div>
+          {templates.length === 0 ? (
+            <div style={{ fontSize:11, color:c.textMuted }}>No templates saved yet. Use ★ Save on any variant in Outreach.</div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+              {[...templates].sort((a,b) => (b.useCount||0) - (a.useCount||0)).slice(0,6).map(tpl => (
+                <div key={tpl.id} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, padding:"6px 0", borderBottom:`1px solid ${c.border}` }}>
+                  <div style={{ minWidth:0 }}>
+                    <div style={{ fontSize:12, fontWeight:600, color:c.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{tpl.name}</div>
+                    <div style={{ fontSize:10, color:c.textMuted }}>{tpl.label}</div>
+                  </div>
+                  <div style={{ fontSize:11, color:c.textMuted, flexShrink:0 }}>{tpl.useCount||0}×</div>
+                </div>
+              ))}
+              {templates.length > 6 && <div style={{ fontSize:11, color:c.textMuted, marginTop:2 }}>+{templates.length - 6} more</div>}
+            </div>
+          )}
+        </div>
+
+        {/* Recent Activity */}
+        <div style={{ background:c.surface, border:`1px solid ${c.border}`, borderRadius:12, padding:"16px 20px" }}>
+          <div style={{ fontSize:13, fontWeight:700, color:c.text, marginBottom:12 }}>Recent Activity</div>
+          {activityItems.length === 0 ? (
+            <div style={{ fontSize:11, color:c.textMuted }}>No activity yet. Start by running an Intel search.</div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:0 }}>
+              {activityItems.map((item, i) => (
+                <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:10, padding:"8px 0", borderBottom: i < activityItems.length - 1 ? `1px solid ${c.border}` : "none" }}>
+                  <div style={{ width:22, height:22, borderRadius:6, background:`${item.color}22`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, flexShrink:0, color:item.color, fontWeight:700 }}>
+                    {item.icon}
+                  </div>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:12, color:c.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{item.text}</div>
+                    <div style={{ fontSize:10, color:c.textMuted, marginTop:1 }}>{formatRelativeTime(item.ts)}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -3333,6 +3622,24 @@ export default function App() {
     }
     setPipelineToast(contact.name || contact.email || "Contact");
     setTimeout(() => setPipelineToast(null), 2000);
+  };
+
+  const handleAddAllToPipeline = (contactList) => {
+    if (!contactList || contactList.length === 0) return;
+    const data = loadPipeline();
+    let added = 0;
+    contactList.forEach(contact => {
+      const emailLower = (contact.email || "").toLowerCase();
+      const alreadyIn = Object.values(data).some(card => card.email === emailLower);
+      if (!alreadyIn) {
+        const card = pipelineCardFromContact(contact);
+        data[card.id] = { ...card, lastActivity: Date.now() };
+        added++;
+      }
+    });
+    savePipeline(data);
+    setPipelineToast(`${added} contact${added !== 1 ? "s" : ""}`);
+    setTimeout(() => setPipelineToast(null), 2500);
   };
 
   const addLog = useCallback((stage, label, data) => {
@@ -3720,7 +4027,7 @@ Return JSON:
             <div style={{ width:28, height:28, borderRadius:8, background:c.accentDim, display:"flex", alignItems:"center", justifyContent:"center" }}><span style={{ fontSize:14 }}>✉</span></div>
             <span style={{ fontWeight:700, fontSize:15, letterSpacing:"-0.02em", color:c.text }}>FinalFold</span>
             <div style={{ display:"flex", gap:2, marginLeft:12, background:c.bg, borderRadius:8, padding:3, border:`1px solid ${c.border}`, WebkitAppRegion:"no-drag" }}>
-              {[["intel","Intel"], ["feature_request","Feature Requests"], ["outreach","Outreach"], ["pipeline","Pipeline"], ["sequences","Sequences"]].map(([val, lbl]) => (
+              {[["intel","Intel"], ["feature_request","Feature Requests"], ["outreach","Outreach"], ["pipeline","Pipeline"], ["sequences","Sequences"], ["dashboard","Dashboard"]].map(([val, lbl]) => (
                 <button key={val} onClick={() => setView(val)}
                   style={{ padding:"4px 12px", borderRadius:6, border:"none", fontSize:12, fontWeight:600, background: view === val ? c.accent : "transparent", color: view === val ? "#fff" : c.textSub, transition:"all 0.15s", cursor:"pointer" }}>
                   {lbl}
@@ -3763,6 +4070,10 @@ Return JSON:
 
           {view === "sequences" && (
             <SequencesView c={c} gmailConnected={gmailConnected} onOpenSettings={() => setShowSettings(true)} />
+          )}
+
+          {view === "dashboard" && (
+            <DashboardView c={c} />
           )}
 
           {/* Intel view */}
@@ -3896,6 +4207,16 @@ Return JSON:
                         <button key={val} onClick={() => setFilter(val)} style={{ padding:"5px 14px", borderRadius:6, border:"none", fontSize:12, fontWeight:600, background: filter === val ? c.accent : "transparent", color: filter === val ? "#fff" : c.textSub, transition:"all 0.15s" }}>{lbl}</button>
                       ))}
                     </div>
+                    {filtered.length > 0 && (
+                      <button
+                        onClick={() => handleAddAllToPipeline(filtered)}
+                        style={{ padding:"5px 12px", borderRadius:7, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:11, fontWeight:600, display:"flex", alignItems:"center", gap:5, cursor:"pointer" }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = c.accent; e.currentTarget.style.color = c.accent; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.color = c.textSub; }}
+                        title={`Add all ${filtered.length} contacts to Pipeline`}>
+                        + All to Pipeline
+                      </button>
+                    )}
                   </div>
                 </div>
                 {filtered.length > 0 ? (
