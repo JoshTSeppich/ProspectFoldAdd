@@ -265,6 +265,24 @@ function detectMode(text) {
   return "intel";
 }
 
+// ─── Contacted status storage (FF-17) ────────────────────────────────────────
+const CONTACTED_KEY = "ff_contacted";
+
+function loadContacted() {
+  try { return JSON.parse(localStorage.getItem(CONTACTED_KEY) || "{}"); } catch { return {}; }
+}
+function markContacted(email, company) {
+  if (!email) return;
+  const data = loadContacted();
+  data[email.toLowerCase()] = { contactedAt: Date.now(), company: company || "" };
+  localStorage.setItem(CONTACTED_KEY, JSON.stringify(data));
+}
+function getContactedInfo(email) {
+  if (!email) return null;
+  const data = loadContacted();
+  return data[email.toLowerCase()] || null;
+}
+
 // ─── Saved runs storage ───────────────────────────────────────────────────────
 const RUNS_KEY = "ff_saved_runs";
 const MAX_RUNS = 10;
@@ -566,10 +584,52 @@ function QualChecklist({ checks, score, c }) {
   );
 }
 
+// ─── Send Preview Modal (FF-18) ───────────────────────────────────────────────
+function SendPreviewModal({ to, subject, body, onConfirm, onCancel, c }) {
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.65)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center" }}>
+      <div style={{ background:c.surface, border:`1px solid ${c.border}`, borderRadius:14, padding:28, maxWidth:520, width:"90%", maxHeight:"85vh", display:"flex", flexDirection:"column" }}>
+        <div style={{ fontSize:15, fontWeight:700, color:c.text, marginBottom:18 }}>Preview Before Sending</div>
+        <div style={{ display:"flex", flexDirection:"column", gap:12, flex:1, overflow:"auto", marginBottom:22 }}>
+          <div>
+            <div style={{ fontSize:10, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:4 }}>To</div>
+            <div style={{ fontSize:13, color: to ? c.text : c.textMuted, fontFamily:"monospace", padding:"8px 10px", background:c.bg, borderRadius:6, border:`1px solid ${c.border}` }}>
+              {to || "(no recipient — add contact email)"}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize:10, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:4 }}>Subject</div>
+            <div style={{ fontSize:13, color:c.text, padding:"8px 10px", background:c.bg, borderRadius:6, border:`1px solid ${c.border}` }}>
+              {subject || "(no subject)"}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize:10, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:4 }}>Body</div>
+            <pre style={{ fontSize:12, color:c.text, fontFamily:"inherit", whiteSpace:"pre-wrap", wordBreak:"break-word", background:c.bg, padding:"12px 14px", borderRadius:6, border:`1px solid ${c.border}`, maxHeight:220, overflow:"auto", margin:0 }}>
+              {body}
+            </pre>
+          </div>
+        </div>
+        <div style={{ display:"flex", gap:10, justifyContent:"flex-end" }}>
+          <button onClick={onCancel}
+            style={{ padding:"9px 20px", borderRadius:8, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:13, cursor:"pointer" }}>
+            Cancel
+          </button>
+          <button onClick={onConfirm} disabled={!to}
+            style={{ padding:"9px 20px", borderRadius:8, border:"none", background: to ? c.accent : c.border, color:"#fff", fontSize:13, fontWeight:700, cursor: to ? "pointer" : "not-allowed" }}>
+            Send Email
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ContactCard({ contact, checklist, targetTitles, onDraftOutreach, c }) {
   const initials = (contact.name || "?").split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
   const checks   = checklist?.length ? runQualChecks(contact, checklist, targetTitles) : [];
   const score    = fitScore(checks);
+  const contactedInfo = getContactedInfo(contact.email);
 
   return (
     <div style={{ background:c.card, border:`1px solid ${c.border}`, borderRadius:12, padding:18, transition:"border-color 0.15s,background 0.15s", boxShadow: c === LIGHT ? "0 1px 3px rgba(0,0,0,0.06)" : "none" }}
@@ -590,6 +650,11 @@ function ContactCard({ contact, checklist, targetTitles, onDraftOutreach, c }) {
                 style={{ color:"#0a66c2", flexShrink:0, lineHeight:1 }}>
                 <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"/></svg>
               </a>
+            )}
+            {contactedInfo && (
+              <span style={{ fontSize:10, padding:"2px 7px", borderRadius:10, background:`${c.green}1a`, color:c.green, fontWeight:600, flexShrink:0, border:`1px solid ${c.green}33` }}>
+                ✓ Contacted {formatRelativeTime(contactedInfo.contactedAt)}
+              </span>
             )}
             {score !== null && (
               <span style={{ marginLeft:"auto", fontSize:11, fontWeight:700, color: score >= 75 ? c.green : score >= 50 ? c.amber : c.red, flexShrink:0 }}>
@@ -1661,16 +1726,18 @@ const OUTREACH_STAGES = [
   { id: "haiku2", label: "Score Variants",  model: "Haiku",  icon: "⚡" },
 ];
 
-function VariantCard({ variant, spamHits, contactEmail, gmailConnected, onDraftSaved, onSent, onChange, c }) {
+function VariantCard({ variant, spamHits, contactEmail, contactCompany, gmailConnected, onDraftSaved, onSent, onChange, c }) {
   const [copiedSubj,  setCopiedSubj]  = useState(null);
   const [copiedBody,  setCopiedBody]  = useState(false);
   const [copiedEmail, setCopiedEmail] = useState(false);
   // Gmail per-variant state
-  const [draftResult, setDraftResult] = useState(null);   // { draftId, gmailUrl }
-  const [sendResult,  setSendResult]  = useState(null);   // { messageId, threadId, sentAt }
-  const [draftSaving, setDraftSaving] = useState(false);
-  const [sending,     setSending]     = useState(false);
-  const [gmailError,  setGmailError]  = useState(null);
+  const [draftResult,  setDraftResult]  = useState(null);   // { draftId, gmailUrl }
+  const [sendResult,   setSendResult]   = useState(null);   // { messageId, threadId, sentAt }
+  const [draftSaving,  setDraftSaving]  = useState(false);
+  const [sending,      setSending]      = useState(false);
+  const [gmailError,   setGmailError]   = useState(null);
+  // Send preview modal (FF-18)
+  const [previewOpen,  setPreviewOpen]  = useState(false);
 
   const wordCount = (variant.body || "").trim().split(/\s+/).filter(Boolean).length;
   const isLinkedIn = variant.label === "LinkedIn";
@@ -1712,6 +1779,7 @@ function VariantCard({ variant, spamHits, contactEmail, gmailConnected, onDraftS
   const handleSendNow = async () => {
     if (!contactEmail) { setGmailError("Add contact email to send"); return; }
     setSending(true); setGmailError(null);
+    setPreviewOpen(false);
     try {
       const result = await invoke("gmail_send_message", {
         to: contactEmail,
@@ -1720,6 +1788,7 @@ function VariantCard({ variant, spamHits, contactEmail, gmailConnected, onDraftS
       });
       const r = { ...result, sentAt: Date.now() };
       setSendResult(r);
+      markContacted(contactEmail, contactCompany);
       onSent && onSent(r);
     } catch (e) { setGmailError(String(e)); }
     setSending(false);
@@ -1836,9 +1905,10 @@ function VariantCard({ variant, spamHits, contactEmail, gmailConnected, onDraftS
                         {draftSaving ? "Saving…" : "Save to Drafts"}
                       </button>
                     )}
-                    {/* Send immediately */}
-                    <button onClick={handleSendNow} disabled={sending || !contactEmail}
-                      style={{ flex:1, padding:"9px 0", borderRadius:8, border:"none", background: contactEmail ? c.accent : c.textMuted, color:"#fff", fontSize:12, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", gap:5, opacity: (sending || !contactEmail) ? 0.5 : 1 }}
+                    {/* Send immediately — opens preview modal */}
+                    <button onClick={() => { if (contactEmail) setPreviewOpen(true); else setGmailError("Add contact email to send"); }}
+                      disabled={sending}
+                      style={{ flex:1, padding:"9px 0", borderRadius:8, border:"none", background: contactEmail ? c.accent : c.textMuted, color:"#fff", fontSize:12, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", gap:5, opacity: sending ? 0.5 : 1 }}
                       title={!contactEmail ? "Add contact email to enable direct send" : ""}>
                       {sending ? "Sending…" : "Send Now"}
                     </button>
@@ -1852,6 +1922,18 @@ function VariantCard({ variant, spamHits, contactEmail, gmailConnected, onDraftS
           </>
         )}
       </div>
+
+      {/* Send preview modal (FF-18) */}
+      {previewOpen && (
+        <SendPreviewModal
+          to={contactEmail}
+          subject={variant.subjects?.[0] || variant.label || ""}
+          body={variant.body || ""}
+          onConfirm={handleSendNow}
+          onCancel={() => setPreviewOpen(false)}
+          c={c}
+        />
+      )}
     </div>
   );
 }
@@ -1874,18 +1956,59 @@ function OutreachView({ c, apiKey, onOpenSettings, outreachBridge, onClearBridge
   const [sharpeningIdx,  setSharpeningIdx]  = useState(null);
   const [error,          setError]          = useState(null);
   // Gmail — sequence drafts and sent tracking
-  const [sequenceDrafts, setSequenceDrafts] = useState([]); // [{step, draft_id, gmail_url}]
-  const [sequenceSent,   setSequenceSent]   = useState({}); // { label: {messageId, threadId, sentAt} }
-  const [savingDrafts,   setSavingDrafts]   = useState(false);
-  const [sendingStep,    setSendingStep]    = useState(null); // label being sent
-  const [replyStatus,    setReplyStatus]    = useState({}); // { label: bool }
-  const [checkingReplies,setCheckingReplies]= useState(false);
+  const [sequenceDrafts,  setSequenceDrafts]  = useState([]); // [{step, draft_id, message_id, gmail_url}]
+  const [sequenceSent,    setSequenceSent]     = useState({}); // { label: {messageId, threadId, sentAt} }
+  const [savingDrafts,    setSavingDrafts]     = useState(false);
+  const [sendingStep,     setSendingStep]      = useState(null); // label being sent
+  const [replyStatus,     setReplyStatus]      = useState({}); // { label: bool }
+  const [replyDetails,    setReplyDetails]     = useState({}); // { label: ReplyDetail }
+  const [checkingReplies, setCheckingReplies]  = useState(false);
+  // FF-15: scheduled sends { step: ISO datetime string }
+  const [schedules,       setSchedules]        = useState({});
+  // FF-16: lifecycle paused state
+  const [paused,          setPaused]           = useState(false);
+  // FF-18: send preview modal for sequence tracker
+  const [seqPreview,      setSeqPreview]       = useState(null); // { step, variant } | null
+  const autoCheckedRef = useRef(false);
   const [history,        setHistory]        = useState(() => {
     try { return JSON.parse(localStorage.getItem("ff_outreach_history") || "[]"); } catch { return []; }
   });
   const [historyOpen,    setHistoryOpen]    = useState(false);
 
   const setSt = (id, status) => setStStates(s => ({ ...s, [id]: status }));
+
+  // FF-16: Auto-check replies once when sequenceSent first gets thread_ids
+  useEffect(() => {
+    if (autoCheckedRef.current) return;
+    const hasSentWithThread = Object.values(sequenceSent).some(s => s.thread_id);
+    if (!hasSentWithThread || !gmailConnected) return;
+    autoCheckedRef.current = true;
+    handleCheckReplies();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sequenceSent, gmailConnected]);
+
+  // FF-15: Scheduled send auto-fire — check every 60s
+  useEffect(() => {
+    if (!Object.keys(schedules).length) return;
+    const tick = async () => {
+      const now = Date.now();
+      for (const [step, isoDate] of Object.entries(schedules)) {
+        if (!isoDate) continue;
+        const scheduledMs = new Date(isoDate).getTime();
+        if (scheduledMs > now) continue;
+        if (sequenceSent[step] || sendingStep === step) continue;
+        const stepVariant = editedVariants.find(v => v.label === step);
+        if (stepVariant && contactEmail && gmailConnected) {
+          setSchedules(prev => { const u = { ...prev }; delete u[step]; return u; });
+          await handleSendSequenceStep(stepVariant);
+        }
+      }
+    };
+    tick(); // Check immediately
+    const interval = setInterval(tick, 60000);
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [schedules, sequenceSent, sendingStep, editedVariants, contactEmail, gmailConnected]);
 
   const chat = useCallback(async (model, system, userMessage, maxTokens = 2048) => {
     if (!apiKey?.trim()) throw new Error("Anthropic API key not set — open Settings ⚙");
@@ -1955,6 +2078,17 @@ ${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`
         to: contactEmail || "",
       });
       setSequenceDrafts(results);
+
+      // FF-18: apply "FinalFold" label to all drafted messages
+      try {
+        const labelId = await invoke("gmail_ensure_label", { name: "FinalFold" });
+        for (const r of results) {
+          if (r.message_id) {
+            await invoke("gmail_apply_label", { messageId: r.message_id, labelId });
+          }
+        }
+      } catch { /* label application is non-fatal */ }
+
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1964,6 +2098,7 @@ ${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`
 
   const handleSendSequenceStep = async (variant) => {
     if (!contactEmail || !gmailConnected) return;
+    setSeqPreview(null); // close preview if open
     setSendingStep(variant.label);
     setError(null);
     try {
@@ -1976,6 +2111,7 @@ ${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`
         ...prev,
         [variant.label]: { ...result, sentAt: Date.now() },
       }));
+      markContacted(contactEmail, company);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1988,13 +2124,21 @@ ${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`
     if (!sentEntries.length) return;
     setCheckingReplies(true);
     const newStatus = {};
+    const newDetails = {};
+    let gotReply = false;
     for (const [label, sent] of sentEntries) {
       try {
-        const hasReply = await invoke("gmail_check_reply", { threadId: sent.thread_id });
-        newStatus[label] = hasReply;
+        const detail = await invoke("gmail_check_reply_detail", { threadId: sent.thread_id });
+        newStatus[label] = detail.has_reply;
+        if (detail.has_reply) {
+          newDetails[label] = detail;
+          gotReply = true;
+        }
       } catch { /* non-fatal */ }
     }
     setReplyStatus(prev => ({ ...prev, ...newStatus }));
+    setReplyDetails(prev => ({ ...prev, ...newDetails }));
+    if (gotReply) setPaused(true);
     setCheckingReplies(false);
   };
 
@@ -2011,6 +2155,11 @@ ${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`
     setSequenceDrafts([]);
     setSequenceSent({});
     setReplyStatus({});
+    setReplyDetails({});
+    setSchedules({});
+    setPaused(false);
+    setSeqPreview(null);
+    autoCheckedRef.current = false;
 
     const context = [
       contactName  && `Contact: ${contactName}`,
@@ -2376,9 +2525,9 @@ Return JSON array of integers only: [score1, score2, score3]`, 256);
                   variant={editedVariants[activeIdx]}
                   spamHits={scanSpam(editedVariants[activeIdx].body || "")}
                   contactEmail={contactEmail}
+                  contactCompany={company}
                   gmailConnected={gmailConnected}
                   onSent={result => {
-                    // For variants mode — mark this variant as sent
                     if (mode === "sequence") {
                       setSequenceSent(prev => ({ ...prev, [editedVariants[activeIdx].label]: { ...result, sentAt: Date.now() } }));
                     }
@@ -2413,20 +2562,33 @@ Return JSON array of integers only: [score1, score2, score3]`, 256);
                   /* Drafts saved — show step-by-step tracker */
                   <div>
                     <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
-                      <div style={{ fontSize:12, fontWeight:700, color:c.text }}>
+                      <div style={{ fontSize:12, fontWeight:700, color:c.text, display:"flex", alignItems:"center", gap:8 }}>
                         Sequence Drafts
-                        <span style={{ marginLeft:8, fontSize:11, fontWeight:400, color:c.textMuted }}>
+                        <span style={{ fontSize:11, fontWeight:400, color:c.textMuted }}>
                           {Object.keys(sequenceSent).length}/{sequenceDrafts.length} sent
                         </span>
+                        {/* FF-16: paused badge */}
+                        {paused && (
+                          <span style={{ fontSize:10, padding:"2px 8px", borderRadius:10, background:`${c.amber}22`, color:c.amber, fontWeight:700, border:`1px solid ${c.amber}44` }}>
+                            ⏸ Paused — got a reply
+                          </span>
+                        )}
                       </div>
                       <div style={{ display:"flex", gap:6 }}>
+                        {/* FF-16: Resume button */}
+                        {paused && (
+                          <button onClick={() => setPaused(false)}
+                            style={{ fontSize:11, padding:"4px 10px", borderRadius:6, border:`1px solid ${c.amber}44`, background:`${c.amber}11`, color:c.amber }}>
+                            ▶ Resume
+                          </button>
+                        )}
                         {Object.values(sequenceSent).some(s => s.thread_id) && (
                           <button onClick={handleCheckReplies} disabled={checkingReplies}
                             style={{ fontSize:11, padding:"4px 10px", borderRadius:6, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, opacity: checkingReplies ? 0.5 : 1 }}>
                             {checkingReplies ? "Checking…" : "↻ Check Replies"}
                           </button>
                         )}
-                        <button onClick={() => { setSequenceDrafts([]); setSequenceSent({}); setReplyStatus({}); }}
+                        <button onClick={() => { setSequenceDrafts([]); setSequenceSent({}); setReplyStatus({}); setReplyDetails({}); setSchedules({}); setPaused(false); }}
                           style={{ fontSize:11, padding:"4px 10px", borderRadius:6, border:`1px solid ${c.border}`, background:"transparent", color:c.textMuted }}>
                           Reset
                         </button>
@@ -2436,18 +2598,25 @@ Return JSON array of integers only: [score1, score2, score3]`, 256);
                       {sequenceDrafts.map(d => {
                         const sent = sequenceSent[d.step];
                         const hasReply = replyStatus[d.step];
+                        const detail = replyDetails[d.step];
+                        const isUnsub = detail?.is_unsubscribe;
                         const stepVariant = editedVariants.find(v => v.label === d.step);
                         const isBeingSent = sendingStep === d.step;
+                        const scheduled = schedules[d.step];
                         return (
-                          <div key={d.step} style={{ padding:"10px 12px", borderRadius:10, border:`1px solid ${sent ? c.green + "44" : c.border}`, background: sent ? c.greenDim : c.bg }}>
-                            <div style={{ fontSize:11, fontWeight:700, color: sent ? c.green : c.text, marginBottom:6 }}>
+                          <div key={d.step} style={{ padding:"10px 12px", borderRadius:10,
+                            border:`1px solid ${isUnsub ? c.red + "44" : sent ? c.green + "44" : c.border}`,
+                            background: isUnsub ? c.redDim : sent ? c.greenDim : c.bg }}>
+                            <div style={{ fontSize:11, fontWeight:700, color: isUnsub ? c.red : sent ? c.green : c.text, marginBottom:5 }}>
                               {d.step}
-                              {hasReply && <span style={{ marginLeft:6, fontSize:9, padding:"1px 5px", borderRadius:3, background:`${c.accent}22`, color:c.accent, fontWeight:700 }}>↩ Reply</span>}
+                              {isUnsub && <span style={{ marginLeft:6, fontSize:9, padding:"1px 5px", borderRadius:3, background:`${c.red}22`, color:c.red, fontWeight:700 }}>⛔ Unsub</span>}
+                              {hasReply && !isUnsub && <span style={{ marginLeft:6, fontSize:9, padding:"1px 5px", borderRadius:3, background:`${c.accent}22`, color:c.accent, fontWeight:700 }}>↩ Reply</span>}
                             </div>
                             {sent ? (
-                              <div style={{ fontSize:10, color:c.green }}>
+                              <div style={{ fontSize:10, color: isUnsub ? c.red : c.green }}>
                                 ✓ Sent {formatRelativeTime(sent.sentAt)}
-                                {hasReply && <div style={{ color:c.accent, marginTop:2 }}>Got a reply!</div>}
+                                {hasReply && !isUnsub && <div style={{ color:c.accent, marginTop:2 }}>Got a reply!</div>}
+                                {isUnsub && <div style={{ marginTop:2 }}>Unsubscribe request</div>}
                               </div>
                             ) : (
                               <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
@@ -2457,11 +2626,25 @@ Return JSON array of integers only: [score1, score2, score3]`, 256);
                                   onMouseLeave={e => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.color = c.textSub; }}>
                                   Open Draft →
                                 </button>
+                                {/* FF-18: Send Now opens preview modal */}
                                 {contactEmail && stepVariant && (
-                                  <button onClick={() => handleSendSequenceStep(stepVariant)} disabled={isBeingSent || generating}
-                                    style={{ width:"100%", padding:"5px 0", borderRadius:6, border:"none", background:c.accent, color:"#fff", fontSize:10, fontWeight:700, opacity:(isBeingSent||generating) ? 0.5 : 1 }}>
+                                  <button onClick={() => setSeqPreview({ step: d.step, variant: stepVariant })}
+                                    disabled={isBeingSent || generating || paused}
+                                    style={{ width:"100%", padding:"5px 0", borderRadius:6, border:"none", background: paused ? c.textMuted : c.accent, color:"#fff", fontSize:10, fontWeight:700, opacity:(isBeingSent||generating||paused) ? 0.5 : 1 }}
+                                    title={paused ? "Resume sequence to send" : ""}>
                                     {isBeingSent ? "Sending…" : "Send Now"}
                                   </button>
+                                )}
+                                {/* FF-15: Schedule picker */}
+                                <input type="datetime-local"
+                                  value={scheduled || ""}
+                                  onChange={e => setSchedules(prev => ({ ...prev, [d.step]: e.target.value }))}
+                                  style={{ width:"100%", fontSize:9, padding:"3px 4px", borderRadius:5, border:`1px solid ${scheduled ? c.accent + "88" : c.border}`, background: scheduled ? `${c.accent}11` : c.surface, color: scheduled ? c.accent : c.textMuted, boxSizing:"border-box" }}
+                                  title="Schedule auto-send for this step" />
+                                {scheduled && (
+                                  <div style={{ fontSize:9, color:c.accent, textAlign:"center" }}>
+                                    ⏰ Scheduled {new Date(scheduled).toLocaleString([], { month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" })}
+                                  </div>
                                 )}
                               </div>
                             )}
@@ -2469,6 +2652,18 @@ Return JSON array of integers only: [score1, score2, score3]`, 256);
                         );
                       })}
                     </div>
+                    {/* FF-16: Reply detail strip */}
+                    {Object.entries(replyDetails).length > 0 && (
+                      <div style={{ marginTop:8, padding:"8px 10px", background:c.bg, borderRadius:8, border:`1px solid ${c.border}` }}>
+                        {Object.entries(replyDetails).map(([step, detail]) => (
+                          <div key={step} style={{ fontSize:11, color:c.textSub }}>
+                            <strong style={{ color: detail.is_unsubscribe ? c.red : c.accent }}>{step}</strong>
+                            {" — "}{detail.reply_subject ? `"${detail.reply_subject.slice(0, 60)}"` : "Reply received"}
+                            {detail.is_unsubscribe && <span style={{ marginLeft:4, color:c.red }}>· Unsubscribe request</span>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -2488,6 +2683,18 @@ Return JSON array of integers only: [score1, score2, score3]`, 256);
           </>
         )}
       </div>
+
+      {/* FF-18: Sequence step send preview modal */}
+      {seqPreview && (
+        <SendPreviewModal
+          to={contactEmail}
+          subject={(seqPreview.variant.subjects || [])[0] || seqPreview.variant.label || ""}
+          body={seqPreview.variant.body || ""}
+          onConfirm={() => handleSendSequenceStep(seqPreview.variant)}
+          onCancel={() => setSeqPreview(null)}
+          c={c}
+        />
+      )}
     </div>
   );
 }
@@ -2894,8 +3101,12 @@ Return JSON:
     }
   }, [markdown, chat, runTableMode, addLog]);
 
-  const filtered  = filter === "email" ? contacts.filter(x => x.email) : contacts;
+  const contactedMap = loadContacted();
+  const filtered  = filter === "email"        ? contacts.filter(x => x.email)
+                  : filter === "uncontacted"  ? contacts.filter(x => !contactedMap[x.email?.toLowerCase()])
+                  : contacts;
   const withEmail = contacts.filter(x => x.email).length;
+  const uncontactedCount = contacts.filter(x => !contactedMap[x.email?.toLowerCase()]).length;
   const showPipeline = running || done || !!error;
 
   return (
@@ -3085,7 +3296,7 @@ Return JSON:
                       </button>
                     )}
                     <div style={{ display:"flex", gap:4, background:c.bg, borderRadius:8, padding:4, border:`1px solid ${c.border}` }}>
-                      {[["all", `All (${contacts.length})`], ["email", `Has Email (${withEmail})`]].map(([val, lbl]) => (
+                      {[["all", `All (${contacts.length})`], ["email", `Has Email (${withEmail})`], ["uncontacted", `Uncontacted (${uncontactedCount})`]].map(([val, lbl]) => (
                         <button key={val} onClick={() => setFilter(val)} style={{ padding:"5px 14px", borderRadius:6, border:"none", fontSize:12, fontWeight:600, background: filter === val ? c.accent : "transparent", color: filter === val ? "#fff" : c.textSub, transition:"all 0.15s" }}>{lbl}</button>
                       ))}
                     </div>

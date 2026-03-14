@@ -305,7 +305,16 @@ pub struct SequenceStep {
 pub struct SequenceDraftResult {
     pub step: String,
     pub draft_id: String,
+    pub message_id: String,
     pub gmail_url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReplyDetail {
+    pub has_reply: bool,
+    pub reply_subject: String,
+    pub reply_snippet: String,
+    pub is_unsubscribe: bool,
 }
 
 // ── Gmail API helpers ─────────────────────────────────────────────────────────
@@ -430,6 +439,7 @@ pub async fn gmail_save_sequence_drafts(
         results.push(SequenceDraftResult {
             step: step.label.clone(),
             draft_id: draft.draft_id,
+            message_id: draft.message_id,
             gmail_url: draft.gmail_url,
         });
         // Small delay between drafts to be polite to the API
@@ -468,4 +478,172 @@ pub async fn gmail_check_reply(thread_id: String) -> Result<bool, String> {
         .unwrap_or(0);
 
     Ok(msg_count > 1)
+}
+
+/// Detailed reply check: returns subject/snippet of the reply message and whether
+/// it looks like an unsubscribe request.
+#[tauri::command]
+pub async fn gmail_check_reply_detail(thread_id: String) -> Result<ReplyDetail, String> {
+    let empty = ReplyDetail {
+        has_reply: false,
+        reply_subject: String::new(),
+        reply_snippet: String::new(),
+        is_unsubscribe: false,
+    };
+    if thread_id.is_empty() {
+        return Ok(empty);
+    }
+    let token = get_access_token().await?;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{}/threads/{}", GMAIL_API, thread_id))
+        .query(&[("format", "metadata"), ("metadataHeaders", "Subject")])
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("Thread detail check failed: {}", e))?;
+
+    let data: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Thread detail parse failed: {}", e))?;
+
+    let messages = match data["messages"].as_array() {
+        Some(m) => m,
+        None => return Ok(empty),
+    };
+
+    if messages.len() <= 1 {
+        return Ok(empty);
+    }
+
+    // Last message in thread is the reply
+    let reply = &messages[messages.len() - 1];
+    let headers = reply["payload"]["headers"].as_array();
+
+    let reply_subject = headers
+        .and_then(|hs| {
+            hs.iter().find(|h| {
+                h["name"]
+                    .as_str()
+                    .map(|n| n.eq_ignore_ascii_case("Subject"))
+                    .unwrap_or(false)
+            })
+        })
+        .and_then(|h| h["value"].as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let reply_snippet = reply["snippet"].as_str().unwrap_or("").to_string();
+
+    let subj_lc = reply_subject.to_lowercase();
+    let snip_lc = reply_snippet.to_lowercase();
+    let is_unsubscribe = subj_lc.contains("unsubscribe")
+        || snip_lc.contains("unsubscribe")
+        || snip_lc.contains("opt out")
+        || snip_lc.contains("opt-out")
+        || snip_lc.contains("remove me")
+        || snip_lc.contains("stop emailing");
+
+    Ok(ReplyDetail {
+        has_reply: true,
+        reply_subject,
+        reply_snippet,
+        is_unsubscribe,
+    })
+}
+
+/// Idempotent label creation. Returns the label_id whether it was created or already existed.
+#[tauri::command]
+pub async fn gmail_ensure_label(name: String) -> Result<String, String> {
+    let token = get_access_token().await?;
+    let client = Client::new();
+
+    // List existing labels
+    let resp = client
+        .get(format!("{}/labels", GMAIL_API))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("Label list request failed: {}", e))?;
+
+    let data: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Label list parse failed: {}", e))?;
+
+    // Return existing label_id if found
+    if let Some(labels) = data["labels"].as_array() {
+        for label in labels {
+            if label["name"]
+                .as_str()
+                .map(|n| n.eq_ignore_ascii_case(&name))
+                .unwrap_or(false)
+            {
+                return Ok(label["id"].as_str().unwrap_or("").to_string());
+            }
+        }
+    }
+
+    // Create new label
+    let create_resp = client
+        .post(format!("{}/labels", GMAIL_API))
+        .bearer_auth(&token)
+        .json(&json!({
+            "name": name,
+            "labelListVisibility": "labelShow",
+            "messageListVisibility": "show"
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Label create request failed: {}", e))?;
+
+    let status = create_resp.status();
+    let create_data: Value = create_resp
+        .json()
+        .await
+        .map_err(|e| format!("Label create parse failed: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "Label create error {}: {}",
+            status,
+            create_data["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown")
+        ));
+    }
+
+    Ok(create_data["id"].as_str().unwrap_or("").to_string())
+}
+
+/// Apply a label (by id) to a message. Idempotent — safe to call multiple times.
+#[tauri::command]
+pub async fn gmail_apply_label(message_id: String, label_id: String) -> Result<(), String> {
+    if message_id.is_empty() || label_id.is_empty() {
+        return Ok(());
+    }
+    let token = get_access_token().await?;
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{}/messages/{}/modify", GMAIL_API, message_id))
+        .bearer_auth(&token)
+        .json(&json!({ "addLabelIds": [label_id] }))
+        .send()
+        .await
+        .map_err(|e| format!("Apply label request failed: {}", e))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let data: Value = resp.json().await.unwrap_or(json!({}));
+        return Err(format!(
+            "Apply label error {}: {}",
+            status,
+            data["error"]["message"].as_str().unwrap_or("unknown")
+        ));
+    }
+
+    Ok(())
 }

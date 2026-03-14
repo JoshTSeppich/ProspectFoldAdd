@@ -303,6 +303,9 @@ pub fn run() {
             gmail::gmail_send_message,
             gmail::gmail_save_sequence_drafts,
             gmail::gmail_check_reply,
+            gmail::gmail_check_reply_detail,
+            gmail::gmail_ensure_label,
+            gmail::gmail_apply_label,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FinalFold");
