@@ -6,6 +6,7 @@ use std::sync::Mutex;
 mod credentials;
 mod generator;
 mod github;
+mod gmail;
 mod repos;
 mod runs;
 
@@ -294,6 +295,14 @@ pub fn run() {
             runs::list_feature_runs,
             runs::load_feature_run,
             runs::update_feature_run_urls,
+            // Gmail integration
+            gmail::gmail_oauth_start,
+            gmail::gmail_check_connection,
+            gmail::gmail_disconnect,
+            gmail::gmail_save_draft,
+            gmail::gmail_send_message,
+            gmail::gmail_save_sequence_drafts,
+            gmail::gmail_check_reply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FinalFold");

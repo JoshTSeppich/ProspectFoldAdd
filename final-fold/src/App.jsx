@@ -797,14 +797,20 @@ function SavedRunsPanel({ runs, currentRunId, onLoad, onDelete, c }) {
   );
 }
 
-function SettingsModal({ apiKey, apolloKeyProp, onSave, onClose, c }) {
+function SettingsModal({ apiKey, apolloKeyProp, onSave, onClose, onGmailConnected, c }) {
   const [anthropicVal, setAnthropicVal] = useState(apiKey);
   const [ghPatVal,     setGhPatVal]     = useState("");
   const [ghPatExists,  setGhPatExists]  = useState(false);
   const [apolloVal,    setApolloVal]    = useState("");
   const [apolloExists, setApolloExists] = useState(!!apolloKeyProp);
   const [saved,        setSaved]        = useState(false);
-  const [verifyStatus, setVerifyStatus] = useState({}); // { anthropic: "ok"|"err"|"loading", github: ... }
+  const [verifyStatus, setVerifyStatus] = useState({});
+  // Gmail OAuth state
+  const [gmailEmail,       setGmailEmail]       = useState(null);   // connected email
+  const [gmailClientId,    setGmailClientId]    = useState("");
+  const [gmailClientSecret,setGmailClientSecret]= useState("");
+  const [gmailConnecting,  setGmailConnecting]  = useState(false);
+  const [gmailError,       setGmailError]       = useState(null);
 
   const verify = async (type) => {
     setVerifyStatus(s => ({ ...s, [type]: "loading" }));
@@ -825,7 +831,6 @@ function SettingsModal({ apiKey, apolloKeyProp, onSave, onClose, c }) {
   };
 
   useEffect(() => {
-    // Load existing keychain values on mount
     invoke("get_credential", { key: "anthropic_key" })
       .then(val => { if (val && !anthropicVal) setAnthropicVal(val); })
       .catch(() => {});
@@ -835,19 +840,20 @@ function SettingsModal({ apiKey, apolloKeyProp, onSave, onClose, c }) {
     invoke("get_credential", { key: "apollo_key" })
       .then(val => { if (val) setApolloExists(true); })
       .catch(() => {});
+    // Load Gmail connection status
+    invoke("gmail_check_connection")
+      .then(email => { if (email) setGmailEmail(email); })
+      .catch(() => {});
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSave = async () => {
-    // Save Anthropic key to localStorage (Intel pipeline) + keychain
     if (anthropicVal.trim()) {
       localStorage.setItem("ff_anthropic_key", anthropicVal);
       try { await invoke("save_credential", { key: "anthropic_key", value: anthropicVal }); } catch {}
     }
-    // Save GitHub PAT to keychain (only if user typed something)
     if (ghPatVal.trim()) {
       try { await invoke("save_credential", { key: "github_pat", value: ghPatVal }); setGhPatExists(true); } catch {}
     }
-    // Save Apollo key to keychain and update module-level ref
     if (apolloVal.trim()) {
       try {
         await invoke("save_credential", { key: "apollo_key", value: apolloVal });
@@ -860,9 +866,38 @@ function SettingsModal({ apiKey, apolloKeyProp, onSave, onClose, c }) {
     setTimeout(onClose, 800);
   };
 
+  const handleGmailConnect = async () => {
+    if (!gmailClientId.trim() || !gmailClientSecret.trim()) {
+      setGmailError("Both Client ID and Client Secret are required");
+      return;
+    }
+    setGmailConnecting(true);
+    setGmailError(null);
+    try {
+      const email = await invoke("gmail_oauth_start", {
+        clientId: gmailClientId.trim(),
+        clientSecret: gmailClientSecret.trim(),
+      });
+      setGmailEmail(email);
+      onGmailConnected && onGmailConnected(email);
+    } catch (e) {
+      setGmailError(String(e));
+    } finally {
+      setGmailConnecting(false);
+    }
+  };
+
+  const handleGmailDisconnect = async () => {
+    await invoke("gmail_disconnect").catch(() => {});
+    setGmailEmail(null);
+    setGmailClientId("");
+    setGmailClientSecret("");
+    onGmailConnected && onGmailConnected(null);
+  };
+
   return (
     <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.5)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:999 }} onClick={onClose}>
-      <div style={{ background:c.surface, border:`1px solid ${c.border}`, borderRadius:16, padding:28, width:460, boxShadow:"0 20px 60px rgba(0,0,0,0.3)" }} onClick={e => e.stopPropagation()}>
+      <div style={{ background:c.surface, border:`1px solid ${c.border}`, borderRadius:16, padding:28, width:480, maxHeight:"90vh", overflowY:"auto", boxShadow:"0 20px 60px rgba(0,0,0,0.3)" }} onClick={e => e.stopPropagation()}>
         <h2 style={{ fontSize:16, fontWeight:700, color:c.text, marginBottom:4 }}>Settings</h2>
         <p style={{ fontSize:12, color:c.textSub, marginBottom:20 }}>Credentials saved to OS keychain — never written to disk as plaintext.</p>
 
@@ -894,13 +929,9 @@ function SettingsModal({ apiKey, apolloKeyProp, onSave, onClose, c }) {
             <span style={{ marginLeft:8, fontSize:11, padding:"2px 6px", borderRadius:4, background:c.greenDim, color:c.green, fontWeight:700 }}>Saved</span>
           )}
         </label>
-        <input
-          type="password"
-          value={ghPatVal}
-          onChange={e => setGhPatVal(e.target.value)}
+        <input type="password" value={ghPatVal} onChange={e => setGhPatVal(e.target.value)}
           placeholder={ghPatExists ? "●●●●●●●●●●●●●●●● (leave blank to keep existing)" : "ghp_..."}
-          style={{ width:"100%", padding:"10px 12px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:13, outline:"none", fontFamily:"monospace" }}
-        />
+          style={{ width:"100%", padding:"10px 12px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:13, outline:"none", fontFamily:"monospace" }} />
         <div style={{ marginTop:6, display:"flex", alignItems:"center", gap:6 }}>
           <svg width="12" height="12" fill="none" stroke={c.amber} strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           <span style={{ fontSize:12, color:c.textMuted }}>Requires <code style={{ fontSize:11, background:c.bg, padding:"1px 4px", borderRadius:3 }}>repo</code> scope (issues:write) — </span>
@@ -926,14 +957,72 @@ function SettingsModal({ apiKey, apolloKeyProp, onSave, onClose, c }) {
             <span style={{ marginLeft:8, fontSize:11, padding:"2px 6px", borderRadius:4, background:c.greenDim, color:c.green, fontWeight:700 }}>Saved</span>
           )}
         </label>
-        <input
-          type="password"
-          value={apolloVal}
-          onChange={e => setApolloVal(e.target.value)}
+        <input type="password" value={apolloVal} onChange={e => setApolloVal(e.target.value)}
           placeholder={apolloExists ? "●●●●●●●●●●●●●●●● (leave blank to keep existing)" : "Enter Apollo API key…"}
-          style={{ width:"100%", padding:"10px 12px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:13, outline:"none", fontFamily:"monospace" }}
-        />
+          style={{ width:"100%", padding:"10px 12px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:13, outline:"none", fontFamily:"monospace" }} />
         <div style={{ marginTop:6, fontSize:12, color:c.textMuted }}>Used for the Intel pipeline contact search.</div>
+
+        {/* ── Gmail Integration ─────────────────────────────────────────────── */}
+        <div style={{ marginTop:22, paddingTop:18, borderTop:`1px solid ${c.border}` }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill={c.accent}><path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.910 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"/></svg>
+            <label style={{ fontSize:12, fontWeight:700, color:c.text }}>Gmail Integration</label>
+            {gmailEmail && (
+              <span style={{ fontSize:11, padding:"2px 7px", borderRadius:4, background:c.greenDim, color:c.green, fontWeight:700 }}>Connected</span>
+            )}
+          </div>
+
+          {gmailEmail ? (
+            /* Connected state */
+            <div style={{ padding:"12px 14px", background:c.bg, border:`1px solid ${c.green}44`, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+              <div>
+                <div style={{ fontSize:13, fontWeight:600, color:c.green }}>✓ {gmailEmail}</div>
+                <div style={{ fontSize:11, color:c.textMuted, marginTop:2 }}>Sequence drafts, direct send, and reply tracking enabled</div>
+              </div>
+              <button onClick={handleGmailDisconnect}
+                style={{ fontSize:11, padding:"4px 10px", borderRadius:6, border:`1px solid ${c.red}44`, background:"transparent", color:c.red, cursor:"pointer" }}
+                onMouseEnter={e => { e.currentTarget.style.background = c.redDim; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}>
+                Disconnect
+              </button>
+            </div>
+          ) : (
+            /* Setup state */
+            <>
+              <div style={{ fontSize:11, color:c.textMuted, marginBottom:10, lineHeight:1.6 }}>
+                Connect your Gmail to save outreach sequences as drafts, send directly from FinalFold, and track replies. Requires a Google Cloud OAuth 2.0 "Desktop app" client.{" "}
+                <button onClick={() => invoke("open_url", { url:"https://console.cloud.google.com/apis/credentials" })}
+                  style={{ color:c.accent, background:"none", border:"none", padding:0, cursor:"pointer", fontSize:11 }}
+                  onMouseEnter={e => e.target.style.textDecoration="underline"}
+                  onMouseLeave={e => e.target.style.textDecoration="none"}>
+                  Create credentials →
+                </button>
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                <input type="text" value={gmailClientId} onChange={e => setGmailClientId(e.target.value)}
+                  placeholder="OAuth 2.0 Client ID (…apps.googleusercontent.com)"
+                  style={{ width:"100%", padding:"9px 12px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:12, outline:"none", fontFamily:"monospace" }} />
+                <input type="password" value={gmailClientSecret} onChange={e => setGmailClientSecret(e.target.value)}
+                  placeholder="Client Secret"
+                  style={{ width:"100%", padding:"9px 12px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:12, outline:"none", fontFamily:"monospace" }} />
+              </div>
+              {gmailError && (
+                <div style={{ marginTop:8, fontSize:11, color:c.red, lineHeight:1.5 }}>{gmailError}</div>
+              )}
+              <button onClick={handleGmailConnect} disabled={gmailConnecting || !gmailClientId.trim() || !gmailClientSecret.trim()}
+                style={{ marginTop:8, width:"100%", padding:"9px 0", borderRadius:8, border:"none", background:c.accent, color:"#fff", fontSize:12, fontWeight:700, opacity: (gmailConnecting || !gmailClientId.trim() || !gmailClientSecret.trim()) ? 0.5 : 1, display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
+                {gmailConnecting ? (
+                  <><div style={{ width:12, height:12, borderRadius:"50%", border:"2px solid rgba(255,255,255,0.3)", borderTopColor:"#fff", animation:"spin 0.8s linear infinite" }} />Waiting for browser…</>
+                ) : "Connect Gmail Account"}
+              </button>
+              {gmailConnecting && (
+                <div style={{ marginTop:6, fontSize:11, color:c.textMuted, textAlign:"center" }}>
+                  Complete sign-in in your browser — waiting up to 5 minutes
+                </div>
+              )}
+            </>
+          )}
+        </div>
 
         <div style={{ display:"flex", gap:10, marginTop:24, justifyContent:"flex-end" }}>
           <button onClick={onClose} style={{ padding:"8px 18px", borderRadius:8, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:13 }}>Cancel</button>
@@ -1572,10 +1661,17 @@ const OUTREACH_STAGES = [
   { id: "haiku2", label: "Score Variants",  model: "Haiku",  icon: "⚡" },
 ];
 
-function VariantCard({ variant, spamHits, contactEmail, onChange, c }) {
+function VariantCard({ variant, spamHits, contactEmail, gmailConnected, onDraftSaved, onSent, onChange, c }) {
   const [copiedSubj,  setCopiedSubj]  = useState(null);
   const [copiedBody,  setCopiedBody]  = useState(false);
   const [copiedEmail, setCopiedEmail] = useState(false);
+  // Gmail per-variant state
+  const [draftResult, setDraftResult] = useState(null);   // { draftId, gmailUrl }
+  const [sendResult,  setSendResult]  = useState(null);   // { messageId, threadId, sentAt }
+  const [draftSaving, setDraftSaving] = useState(false);
+  const [sending,     setSending]     = useState(false);
+  const [gmailError,  setGmailError]  = useState(null);
+
   const wordCount = (variant.body || "").trim().split(/\s+/).filter(Boolean).length;
   const isLinkedIn = variant.label === "LinkedIn";
 
@@ -1597,6 +1693,36 @@ function VariantCard({ variant, spamHits, contactEmail, onChange, c }) {
     const body = encodeURIComponent(variant.body || "");
     const to   = encodeURIComponent(contactEmail || "");
     invoke("open_url", { url: `https://mail.google.com/mail/?view=cm&to=${to}&su=${su}&body=${body}` });
+  };
+
+  const handleSaveDraft = async () => {
+    setDraftSaving(true); setGmailError(null);
+    try {
+      const result = await invoke("gmail_save_draft", {
+        to: contactEmail || "",
+        subject: variant.subjects?.[0] || variant.label || "",
+        body: variant.body || "",
+      });
+      setDraftResult(result);
+      onDraftSaved && onDraftSaved(result);
+    } catch (e) { setGmailError(String(e)); }
+    setDraftSaving(false);
+  };
+
+  const handleSendNow = async () => {
+    if (!contactEmail) { setGmailError("Add contact email to send"); return; }
+    setSending(true); setGmailError(null);
+    try {
+      const result = await invoke("gmail_send_message", {
+        to: contactEmail,
+        subject: variant.subjects?.[0] || variant.label || "",
+        body: variant.body || "",
+      });
+      const r = { ...result, sentAt: Date.now() };
+      setSendResult(r);
+      onSent && onSent(r);
+    } catch (e) { setGmailError(String(e)); }
+    setSending(false);
   };
 
   return (
@@ -1664,28 +1790,73 @@ function VariantCard({ variant, spamHits, contactEmail, onChange, c }) {
 
         {/* Send buttons — email variants only */}
         {!isLinkedIn && (
-          <div style={{ marginTop:12, display:"flex", gap:8 }}>
-            <button onClick={openInMail}
-              style={{ flex:1, padding:"9px 0", borderRadius:8, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:12, fontWeight:600, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}
-              onMouseEnter={e => { e.currentTarget.style.borderColor = c.accent; e.currentTarget.style.color = c.accent; }}
-              onMouseLeave={e => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.color = c.textSub; }}>
-              ✉ Open in Mail
-            </button>
-            <button onClick={openInGmail}
-              style={{ flex:1, padding:"9px 0", borderRadius:8, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:12, fontWeight:600, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}
-              onMouseEnter={e => { e.currentTarget.style.borderColor = "#ea4335"; e.currentTarget.style.color = "#ea4335"; }}
-              onMouseLeave={e => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.color = c.textSub; }}>
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.910 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"/></svg>
-              Open in Gmail
-            </button>
-          </div>
+          <>
+            {/* Open in Mail / Open in Gmail (compose URL) */}
+            <div style={{ marginTop:12, display:"flex", gap:8 }}>
+              <button onClick={openInMail}
+                style={{ flex:1, padding:"9px 0", borderRadius:8, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:12, fontWeight:600, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = c.accent; e.currentTarget.style.color = c.accent; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.color = c.textSub; }}>
+                ✉ Open in Mail
+              </button>
+              <button onClick={openInGmail}
+                style={{ flex:1, padding:"9px 0", borderRadius:8, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:12, fontWeight:600, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = "#ea4335"; e.currentTarget.style.color = "#ea4335"; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.color = c.textSub; }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.910 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"/></svg>
+                Open in Gmail
+              </button>
+            </div>
+
+            {/* Gmail API actions (requires OAuth) */}
+            {gmailConnected && (
+              <div style={{ marginTop:8 }}>
+                {sendResult ? (
+                  /* Sent confirmation */
+                  <div style={{ padding:"10px 14px", background:c.greenDim, border:`1px solid ${c.green}44`, borderRadius:8, display:"flex", alignItems:"center", gap:8 }}>
+                    <span style={{ fontSize:14, color:c.green }}>✓</span>
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:12, fontWeight:700, color:c.green }}>Sent via Gmail</div>
+                      <div style={{ fontSize:11, color:c.textMuted, marginTop:1 }}>{new Date(sendResult.sentAt).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}</div>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ display:"flex", gap:6 }}>
+                    {/* Save as Gmail draft */}
+                    {draftResult ? (
+                      <button onClick={() => invoke("open_url", { url: draftResult.gmail_url })}
+                        style={{ flex:1, padding:"9px 0", borderRadius:8, border:`1px solid ${c.green}44`, background:c.greenDim, color:c.green, fontSize:12, fontWeight:600, display:"flex", alignItems:"center", justifyContent:"center", gap:5 }}>
+                        ✓ Open Draft →
+                      </button>
+                    ) : (
+                      <button onClick={handleSaveDraft} disabled={draftSaving}
+                        style={{ flex:1, padding:"9px 0", borderRadius:8, border:`1px solid ${c.accent}55`, background:`${c.accent}11`, color:c.accent, fontSize:12, fontWeight:600, display:"flex", alignItems:"center", justifyContent:"center", gap:5, opacity: draftSaving ? 0.6 : 1 }}
+                        onMouseEnter={e => { if (!draftSaving) { e.currentTarget.style.background = `${c.accent}22`; } }}
+                        onMouseLeave={e => { e.currentTarget.style.background = `${c.accent}11`; }}>
+                        {draftSaving ? "Saving…" : "Save to Drafts"}
+                      </button>
+                    )}
+                    {/* Send immediately */}
+                    <button onClick={handleSendNow} disabled={sending || !contactEmail}
+                      style={{ flex:1, padding:"9px 0", borderRadius:8, border:"none", background: contactEmail ? c.accent : c.textMuted, color:"#fff", fontSize:12, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", gap:5, opacity: (sending || !contactEmail) ? 0.5 : 1 }}
+                      title={!contactEmail ? "Add contact email to enable direct send" : ""}>
+                      {sending ? "Sending…" : "Send Now"}
+                    </button>
+                  </div>
+                )}
+                {gmailError && (
+                  <div style={{ marginTop:6, fontSize:11, color:c.red }}>{gmailError}</div>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
   );
 }
 
-function OutreachView({ c, apiKey, onOpenSettings, outreachBridge, onClearBridge }) {
+function OutreachView({ c, apiKey, onOpenSettings, outreachBridge, onClearBridge, gmailConnected, onGmailConnectedChange }) {
   const [stStates,       setStStates]       = useState({});
   const [contactName,    setContactName]    = useState("");
   const [contactTitle,   setContactTitle]   = useState("");
@@ -1702,6 +1873,13 @@ function OutreachView({ c, apiKey, onOpenSettings, outreachBridge, onClearBridge
   const [scoringInProgress, setScoringInProgress] = useState(false);
   const [sharpeningIdx,  setSharpeningIdx]  = useState(null);
   const [error,          setError]          = useState(null);
+  // Gmail — sequence drafts and sent tracking
+  const [sequenceDrafts, setSequenceDrafts] = useState([]); // [{step, draft_id, gmail_url}]
+  const [sequenceSent,   setSequenceSent]   = useState({}); // { label: {messageId, threadId, sentAt} }
+  const [savingDrafts,   setSavingDrafts]   = useState(false);
+  const [sendingStep,    setSendingStep]    = useState(null); // label being sent
+  const [replyStatus,    setReplyStatus]    = useState({}); // { label: bool }
+  const [checkingReplies,setCheckingReplies]= useState(false);
   const [history,        setHistory]        = useState(() => {
     try { return JSON.parse(localStorage.getItem("ff_outreach_history") || "[]"); } catch { return []; }
   });
@@ -1759,6 +1937,67 @@ ${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`
     setSharpeningIdx(null);
   };
 
+  // ── Gmail sequence actions ────────────────────────────────────────────────
+  const handleSaveSequenceDrafts = async () => {
+    if (!editedVariants.length || !gmailConnected) return;
+    setSavingDrafts(true);
+    setError(null);
+    try {
+      const steps = editedVariants
+        .filter(v => v.label !== "LinkedIn")
+        .map(v => ({
+          label:   v.label,
+          subject: (v.subjects || [])[0] || v.label,
+          body:    v.body || "",
+        }));
+      const results = await invoke("gmail_save_sequence_drafts", {
+        steps,
+        to: contactEmail || "",
+      });
+      setSequenceDrafts(results);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSavingDrafts(false);
+    }
+  };
+
+  const handleSendSequenceStep = async (variant) => {
+    if (!contactEmail || !gmailConnected) return;
+    setSendingStep(variant.label);
+    setError(null);
+    try {
+      const result = await invoke("gmail_send_message", {
+        to:      contactEmail,
+        subject: (variant.subjects || [])[0] || variant.label,
+        body:    variant.body || "",
+      });
+      setSequenceSent(prev => ({
+        ...prev,
+        [variant.label]: { ...result, sentAt: Date.now() },
+      }));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSendingStep(null);
+    }
+  };
+
+  const handleCheckReplies = async () => {
+    const sentEntries = Object.entries(sequenceSent).filter(([, v]) => v.thread_id);
+    if (!sentEntries.length) return;
+    setCheckingReplies(true);
+    const newStatus = {};
+    for (const [label, sent] of sentEntries) {
+      try {
+        const hasReply = await invoke("gmail_check_reply", { threadId: sent.thread_id });
+        newStatus[label] = hasReply;
+      } catch { /* non-fatal */ }
+    }
+    setReplyStatus(prev => ({ ...prev, ...newStatus }));
+    setCheckingReplies(false);
+  };
+
   const handleGenerate = async () => {
     if (!company.trim() && !intelCtx.trim()) return;
     setGenerating(true);
@@ -1768,6 +2007,10 @@ ${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`
     setScores([]);
     setScoringInProgress(false);
     setStStates({});
+    // Reset sequence tracking on regenerate
+    setSequenceDrafts([]);
+    setSequenceSent({});
+    setReplyStatus({});
 
     const context = [
       contactName  && `Contact: ${contactName}`,
@@ -2133,9 +2376,113 @@ Return JSON array of integers only: [score1, score2, score3]`, 256);
                   variant={editedVariants[activeIdx]}
                   spamHits={scanSpam(editedVariants[activeIdx].body || "")}
                   contactEmail={contactEmail}
+                  gmailConnected={gmailConnected}
+                  onSent={result => {
+                    // For variants mode — mark this variant as sent
+                    if (mode === "sequence") {
+                      setSequenceSent(prev => ({ ...prev, [editedVariants[activeIdx].label]: { ...result, sentAt: Date.now() } }));
+                    }
+                  }}
                   onChange={(field, val) => setEditedVariants(prev => prev.map((v, i) => i === activeIdx ? { ...v, [field]: val } : v))}
                   c={c}
                 />
+              </div>
+            )}
+
+            {/* ── Sequence Tracker panel (sequence mode + Gmail connected) ── */}
+            {mode === "sequence" && editedVariants.length > 0 && gmailConnected && (
+              <div style={{ flexShrink:0, borderTop:`1px solid ${c.border}`, background:c.surface, padding:"14px 20px" }}>
+                {sequenceDrafts.length === 0 ? (
+                  /* Not yet saved */
+                  <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:13, fontWeight:700, color:c.text }}>Gmail Sequence</div>
+                      <div style={{ fontSize:11, color:c.textMuted, marginTop:2 }}>
+                        Save all {editedVariants.filter(v => v.label !== "LinkedIn").length} emails as Gmail drafts in one click
+                        {contactEmail ? ` → ${contactEmail}` : " (add email to pre-fill To:)"}
+                      </div>
+                    </div>
+                    <button onClick={handleSaveSequenceDrafts} disabled={savingDrafts || generating}
+                      style={{ flexShrink:0, padding:"8px 18px", borderRadius:8, border:"none", background:c.accent, color:"#fff", fontSize:12, fontWeight:700, opacity:(savingDrafts||generating) ? 0.5 : 1, display:"flex", alignItems:"center", gap:6 }}>
+                      {savingDrafts ? (
+                        <><div style={{ width:11, height:11, borderRadius:"50%", border:"2px solid rgba(255,255,255,0.3)", borderTopColor:"#fff", animation:"spin 0.8s linear infinite" }} />Saving…</>
+                      ) : "Save All to Gmail Drafts"}
+                    </button>
+                  </div>
+                ) : (
+                  /* Drafts saved — show step-by-step tracker */
+                  <div>
+                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
+                      <div style={{ fontSize:12, fontWeight:700, color:c.text }}>
+                        Sequence Drafts
+                        <span style={{ marginLeft:8, fontSize:11, fontWeight:400, color:c.textMuted }}>
+                          {Object.keys(sequenceSent).length}/{sequenceDrafts.length} sent
+                        </span>
+                      </div>
+                      <div style={{ display:"flex", gap:6 }}>
+                        {Object.values(sequenceSent).some(s => s.thread_id) && (
+                          <button onClick={handleCheckReplies} disabled={checkingReplies}
+                            style={{ fontSize:11, padding:"4px 10px", borderRadius:6, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, opacity: checkingReplies ? 0.5 : 1 }}>
+                            {checkingReplies ? "Checking…" : "↻ Check Replies"}
+                          </button>
+                        )}
+                        <button onClick={() => { setSequenceDrafts([]); setSequenceSent({}); setReplyStatus({}); }}
+                          style={{ fontSize:11, padding:"4px 10px", borderRadius:6, border:`1px solid ${c.border}`, background:"transparent", color:c.textMuted }}>
+                          Reset
+                        </button>
+                      </div>
+                    </div>
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8 }}>
+                      {sequenceDrafts.map(d => {
+                        const sent = sequenceSent[d.step];
+                        const hasReply = replyStatus[d.step];
+                        const stepVariant = editedVariants.find(v => v.label === d.step);
+                        const isBeingSent = sendingStep === d.step;
+                        return (
+                          <div key={d.step} style={{ padding:"10px 12px", borderRadius:10, border:`1px solid ${sent ? c.green + "44" : c.border}`, background: sent ? c.greenDim : c.bg }}>
+                            <div style={{ fontSize:11, fontWeight:700, color: sent ? c.green : c.text, marginBottom:6 }}>
+                              {d.step}
+                              {hasReply && <span style={{ marginLeft:6, fontSize:9, padding:"1px 5px", borderRadius:3, background:`${c.accent}22`, color:c.accent, fontWeight:700 }}>↩ Reply</span>}
+                            </div>
+                            {sent ? (
+                              <div style={{ fontSize:10, color:c.green }}>
+                                ✓ Sent {formatRelativeTime(sent.sentAt)}
+                                {hasReply && <div style={{ color:c.accent, marginTop:2 }}>Got a reply!</div>}
+                              </div>
+                            ) : (
+                              <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                                <button onClick={() => invoke("open_url", { url: d.gmail_url })}
+                                  style={{ width:"100%", padding:"5px 0", borderRadius:6, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:10, fontWeight:600 }}
+                                  onMouseEnter={e => { e.currentTarget.style.borderColor = c.accent; e.currentTarget.style.color = c.accent; }}
+                                  onMouseLeave={e => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.color = c.textSub; }}>
+                                  Open Draft →
+                                </button>
+                                {contactEmail && stepVariant && (
+                                  <button onClick={() => handleSendSequenceStep(stepVariant)} disabled={isBeingSent || generating}
+                                    style={{ width:"100%", padding:"5px 0", borderRadius:6, border:"none", background:c.accent, color:"#fff", fontSize:10, fontWeight:700, opacity:(isBeingSent||generating) ? 0.5 : 1 }}>
+                                    {isBeingSent ? "Sending…" : "Send Now"}
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Prompt to connect Gmail (sequence mode, not connected) */}
+            {mode === "sequence" && editedVariants.length > 0 && !gmailConnected && (
+              <div style={{ flexShrink:0, borderTop:`1px solid ${c.border}`, background:c.surface, padding:"12px 20px", display:"flex", alignItems:"center", gap:10 }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill={c.textMuted}><path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.910 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"/></svg>
+                <span style={{ fontSize:12, color:c.textMuted }}>
+                  Connect Gmail in{" "}
+                  <button onClick={onOpenSettings} style={{ color:c.accent, background:"none", border:"none", padding:0, cursor:"pointer", fontSize:12, textDecoration:"underline" }}>Settings</button>
+                  {" "}to save this sequence as Gmail drafts and track replies
+                </span>
               </div>
             )}
           </>
@@ -2153,6 +2500,7 @@ export default function App() {
   const [markdown,     setMarkdown]     = useState("");
   const [anthropicKey, setAnthropicKey] = useState(() => localStorage.getItem("ff_anthropic_key") || "");
   const [apolloKey,    setApolloKey]    = useState("");
+  const [gmailConnected, setGmailConnected] = useState(null); // null | email string
   const [bridgeContext,   setBridgeContext]   = useState(null); // { companyName, notes }
   const [outreachBridge,  setOutreachBridge]  = useState(null); // { contactName, contactTitle, company, intelContext }
   const [showSettings, setShowSettings] = useState(false);
@@ -2174,12 +2522,13 @@ export default function App() {
 
   const c = isDark ? DARK : LIGHT;
 
-  // Load Apollo key from keychain on mount and keep module-level ref in sync.
+  // Load Apollo key and Gmail connection from keychain on mount.
   useEffect(() => {
     invoke("get_credential", { key: "apollo_key" })
-      .then(val => {
-        if (val) { setApolloKey(val); _apolloKey = val; }
-      })
+      .then(val => { if (val) { setApolloKey(val); _apolloKey = val; } })
+      .catch(() => {});
+    invoke("gmail_check_connection")
+      .then(email => { if (email) setGmailConnected(email); })
       .catch(() => {});
   }, []);
 
@@ -2565,6 +2914,7 @@ Return JSON:
             setAnthropicKey(k); localStorage.setItem("ff_anthropic_key", k);
             if (ak) { setApolloKey(ak); _apolloKey = ak; }
           }}
+          onGmailConnected={email => setGmailConnected(email || null)}
           onClose={() => setShowSettings(false)} c={c} />
       )}
 
@@ -2604,7 +2954,8 @@ Return JSON:
 
           {view === "outreach" && (
             <OutreachView c={c} apiKey={anthropicKey} onOpenSettings={() => setShowSettings(true)}
-              outreachBridge={outreachBridge} onClearBridge={() => setOutreachBridge(null)} />
+              outreachBridge={outreachBridge} onClearBridge={() => setOutreachBridge(null)}
+              gmailConnected={gmailConnected} onGmailConnectedChange={setGmailConnected} />
           )}
 
           {/* Intel view */}
