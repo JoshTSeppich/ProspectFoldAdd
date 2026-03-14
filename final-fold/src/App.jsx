@@ -63,6 +63,28 @@ function buildBridgeContext(queryLog, contacts, pipelineLog) {
   return companyName ? { companyName, notes } : null;
 }
 
+// ─── Intel → Outreach bridge ──────────────────────────────────────────────────
+function buildOutreachBridge(contacts, markdown) {
+  const first = contacts[0];
+  if (!first) return null;
+  return {
+    contactName:  first.name    || "",
+    contactTitle: first.title   || "",
+    company:      first.company || "",
+    intelContext: markdown.slice(0, 4000),
+  };
+}
+
+// ─── Spam scanner ─────────────────────────────────────────────────────────────
+const SPAM_WORDS = [
+  "free","guaranteed","winner","urgent","act now","limited time","click here",
+  "no obligation","risk free","earn money","you won","congratulations",
+  "order now","special promotion","buy now","cash bonus","incredible deal",
+];
+function scanSpam(text) {
+  return SPAM_WORDS.filter(w => new RegExp(`\\b${w.replace(/ /g, "\\s+")}\\b`, "i").test(text));
+}
+
 function emailScore(c) {
   if (!c.email) return 0;
   if (c.emailStatus === "verified") return 3;
@@ -543,7 +565,7 @@ function QualChecklist({ checks, score, c }) {
   );
 }
 
-function ContactCard({ contact, checklist, targetTitles, c }) {
+function ContactCard({ contact, checklist, targetTitles, onDraftOutreach, c }) {
   const initials = (contact.name || "?").split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
   const checks   = checklist?.length ? runQualChecks(contact, checklist, targetTitles) : [];
   const score    = fitScore(checks);
@@ -600,6 +622,19 @@ function ContactCard({ contact, checklist, targetTitles, c }) {
           <span style={{ fontSize:12, color:c.textMuted, fontStyle:"italic" }}>Email not available</span>
         )}
       </div>
+
+      {/* Draft Outreach button */}
+      {onDraftOutreach && (
+        <div style={{ marginTop:10, display:"flex", justifyContent:"flex-end" }}>
+          <button
+            onClick={() => onDraftOutreach(contact)}
+            style={{ padding:"4px 12px", borderRadius:6, border:`1px solid ${c.green}44`, background:`${c.green}11`, color:c.green, fontSize:11, fontWeight:600, cursor:"pointer", transition:"all 0.15s" }}
+            onMouseEnter={e => { e.currentTarget.style.background = `${c.green}22`; e.currentTarget.style.borderColor = c.green; }}
+            onMouseLeave={e => { e.currentTarget.style.background = `${c.green}11`; e.currentTarget.style.borderColor = `${c.green}44`; }}>
+            Draft Outreach →
+          </button>
+        </div>
+      )}
 
       {/* Hook */}
       {contact.hook && (
@@ -1528,15 +1563,558 @@ function FeatureRequestView({ c, onOpenSettings, bridgeContext, onClearBridge })
   return null;
 }
 
+// ─── Outreach Email Generator ─────────────────────────────────────────────────
+
+const OUTREACH_STAGES = [
+  { id: "haiku",  label: "Extract Signals", model: "Haiku",  icon: "⚡" },
+  { id: "sonnet", label: "Draft Emails",    model: "Sonnet", icon: "✦" },
+  { id: "haiku2", label: "Score Variants",  model: "Haiku",  icon: "⚡" },
+];
+
+function VariantCard({ variant, spamHits, onChange, c }) {
+  const [copiedSubj,  setCopiedSubj]  = useState(null);
+  const [copiedBody,  setCopiedBody]  = useState(false);
+  const [copiedEmail, setCopiedEmail] = useState(false);
+  const wordCount = (variant.body || "").trim().split(/\s+/).filter(Boolean).length;
+  const isLinkedIn = variant.label === "LinkedIn";
+
+  const copyEmail = () => {
+    const subj = variant.subjects?.[0];
+    const text = subj ? `Subject: ${subj}\n\n${variant.body || ""}` : variant.body || "";
+    navigator.clipboard.writeText(text).then(() => { setCopiedEmail(true); setTimeout(() => setCopiedEmail(false), 1800); });
+  };
+
+  return (
+    <div style={{ maxWidth:680, margin:"0 auto" }}>
+      {/* Subject lines (not for LinkedIn) */}
+      {!isLinkedIn && (variant.subjects || []).length > 0 && (
+        <div style={{ marginBottom:20 }}>
+          <div style={{ fontSize:11, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:8 }}>Subject Lines</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+            {(variant.subjects || []).map((subj, i) => (
+              <div key={i} style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <input
+                  type="text"
+                  value={subj}
+                  onChange={e => { const u = [...variant.subjects]; u[i] = e.target.value; onChange("subjects", u); }}
+                  style={{ flex:1, padding:"8px 10px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:13, outline:"none" }}
+                />
+                <button
+                  onClick={() => { navigator.clipboard.writeText(subj).then(() => { setCopiedSubj(i); setTimeout(() => setCopiedSubj(null), 1800); }); }}
+                  style={{ flexShrink:0, padding:"5px 10px", borderRadius:6, border:`1px solid ${copiedSubj === i ? c.green : c.border}`, background: copiedSubj === i ? c.greenDim : "transparent", color: copiedSubj === i ? c.green : c.textSub, fontSize:11, fontWeight:600, cursor:"pointer", transition:"all 0.15s" }}>
+                  {copiedSubj === i ? "✓" : "Copy"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Body */}
+      <div>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
+          <div style={{ fontSize:11, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase" }}>
+            {isLinkedIn ? "Message" : "Email Body"}
+          </div>
+          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+            <span style={{ fontSize:11, color: wordCount > 120 ? c.red : wordCount > 100 ? c.amber : c.textMuted }}>
+              {wordCount} words{wordCount > 120 ? " ⚠ over 120" : ""}
+            </span>
+            {/* Copy Email — subject + blank line + body in one shot */}
+            {!isLinkedIn && (variant.subjects || []).length > 0 && (
+              <button onClick={copyEmail}
+                style={{ padding:"5px 12px", borderRadius:6, border:`1px solid ${copiedEmail ? c.green : c.border}`, background: copiedEmail ? c.greenDim : "transparent", color: copiedEmail ? c.green : c.textSub, fontSize:11, fontWeight:600, cursor:"pointer", transition:"all 0.15s" }}>
+                {copiedEmail ? "✓ Copied" : "Copy Email"}
+              </button>
+            )}
+            <button
+              onClick={() => { navigator.clipboard.writeText(variant.body || "").then(() => { setCopiedBody(true); setTimeout(() => setCopiedBody(false), 1800); }); }}
+              style={{ padding:"5px 12px", borderRadius:6, border:`1px solid ${copiedBody ? c.green : c.border}`, background: copiedBody ? c.greenDim : "transparent", color: copiedBody ? c.green : c.textSub, fontSize:11, fontWeight:600, cursor:"pointer", transition:"all 0.15s" }}>
+              {copiedBody ? "✓ Copied" : isLinkedIn ? "Copy" : "Copy Body"}
+            </button>
+          </div>
+        </div>
+        <textarea
+          value={variant.body || ""}
+          onChange={e => onChange("body", e.target.value)}
+          rows={isLinkedIn ? 10 : 12}
+          style={{ width:"100%", padding:"14px", background:c.bg, border:`1px solid ${(spamHits || []).length > 0 ? c.amber : c.border}`, borderRadius:10, color:c.text, fontSize:13, fontFamily:"inherit", lineHeight:1.7, outline:"none", resize:"vertical" }}
+        />
+        {/* Anti-spam warning */}
+        {(spamHits || []).length > 0 && (
+          <div style={{ marginTop:6, fontSize:11, color:c.amber }}>
+            ⚠ {spamHits.length} spam word{spamHits.length > 1 ? "s" : ""}: {spamHits.join(", ")}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function OutreachView({ c, apiKey, onOpenSettings, outreachBridge, onClearBridge }) {
+  const [stStates,       setStStates]       = useState({});
+  const [contactName,    setContactName]    = useState("");
+  const [contactTitle,   setContactTitle]   = useState("");
+  const [company,        setCompany]        = useState("");
+  const [intelCtx,       setIntelCtx]       = useState("");
+  const [tone,           setTone]           = useState("direct");
+  const [mode,           setMode]           = useState("variants"); // "variants" | "sequence"
+  const [generating,     setGenerating]     = useState(false);
+  const [signals,        setSignals]        = useState(null);
+  const [editedVariants, setEditedVariants] = useState([]);
+  const [activeIdx,      setActiveIdx]      = useState(0);
+  const [scores,         setScores]         = useState([]);
+  const [scoringInProgress, setScoringInProgress] = useState(false);
+  const [sharpeningIdx,  setSharpeningIdx]  = useState(null);
+  const [error,          setError]          = useState(null);
+  const [history,        setHistory]        = useState(() => {
+    try { return JSON.parse(localStorage.getItem("ff_outreach_history") || "[]"); } catch { return []; }
+  });
+  const [historyOpen,    setHistoryOpen]    = useState(false);
+
+  const setSt = (id, status) => setStStates(s => ({ ...s, [id]: status }));
+
+  const chat = useCallback(async (model, system, userMessage, maxTokens = 2048) => {
+    if (!apiKey?.trim()) throw new Error("Anthropic API key not set — open Settings ⚙");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await invoke("anthropic_chat", { apiKey, model, system, userMessage, maxTokens });
+      } catch (err) {
+        if (String(err).includes("429") && attempt < 2) {
+          await new Promise(r => setTimeout(r, (attempt + 1) * 10000));
+          continue;
+        }
+        throw err;
+      }
+    }
+  }, [apiKey]);
+
+  // Pre-fill from outreach bridge
+  useEffect(() => {
+    if (!outreachBridge) return;
+    setContactName(outreachBridge.contactName || "");
+    setContactTitle(outreachBridge.contactTitle || "");
+    setCompany(outreachBridge.company || "");
+    setIntelCtx(outreachBridge.intelContext || "");
+  }, [outreachBridge]);
+
+  const handleSharpen = async (idx) => {
+    if (sharpeningIdx !== null || generating) return;
+    const v = editedVariants[idx];
+    if (!v) return;
+    setSharpeningIdx(idx);
+    try {
+      const hasSubjects = (v.subjects || []).length > 0;
+      const raw = await chat(SONNET,
+        "You are a B2B email editor. Return ONLY valid JSON — no preamble, no code fences.",
+        `Rewrite this cold email to be 20-30% shorter and more direct. Keep every named signal and specific detail. Make every sentence earn its place.
+
+Return JSON: ${hasSubjects ? `{ "subjects": ["sharper subject 1", "sharper subject 2"], "body": "..." }` : `{ "body": "..." }`}
+
+Current email:
+${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`, 1024);
+      const result = parseJson(raw);
+      setEditedVariants(prev => prev.map((item, i) => i === idx ? {
+        ...item,
+        body: result.body || item.body,
+        ...(hasSubjects && result.subjects ? { subjects: result.subjects } : {}),
+      } : item));
+    } catch { /* non-fatal */ }
+    setSharpeningIdx(null);
+  };
+
+  const handleGenerate = async () => {
+    if (!company.trim() && !intelCtx.trim()) return;
+    setGenerating(true);
+    setError(null);
+    setEditedVariants([]);
+    setSignals(null);
+    setScores([]);
+    setScoringInProgress(false);
+    setStStates({});
+
+    const context = [
+      contactName  && `Contact: ${contactName}`,
+      contactTitle && `Title: ${contactTitle}`,
+      company      && `Company: ${company}`,
+      intelCtx     && `\n\nIntel Context:\n${intelCtx.slice(0, 4000)}`,
+    ].filter(Boolean).join("\n");
+
+    try {
+      // Phase 1: Haiku extracts Three-Signal data
+      setSt("haiku", "active");
+      const sigRaw = await chat(HAIKU,
+        "You extract B2B outreach signals from sales intelligence. Return ONLY valid JSON — no preamble, no code fences.",
+        `From the contact and intel data below, identify the three types of fit signals for a cold email:
+
+1. Structural fit: why this person's title/role is a clear ICP match
+2. Situational fit: current buying triggers (hiring, funding, product changes, pain points)
+3. Psychological fit: personal/professional signals that make them uniquely receptive (open source, blog, talks, projects)
+
+Return JSON:
+{
+  "structural": "one sentence",
+  "situational": "one sentence",
+  "psychological": "one sentence or null",
+  "companyPain": "sharpest pain point in one sentence",
+  "contactName": "name or Unknown",
+  "contactTitle": "title or Unknown",
+  "company": "company name"
+}
+
+DATA:
+${context}`, 1024);
+      const sigs = parseJson(sigRaw);
+      setSignals(sigs);
+      setSt("haiku", "done");
+
+      const dName = sigs.contactName || contactName || "prospect";
+      const dTitle = sigs.contactTitle || contactTitle || "decision maker";
+      const dCo = sigs.company || company;
+
+      // Phase 2: Sonnet — branches on mode
+      setSt("sonnet", "active");
+      const toneDesc = tone === "direct"  ? "direct and blunt — get to the point in 2 sentences, no fluff"
+                     : tone === "formal"  ? "professional and formal — polished business language"
+                     :                     "conversational but professional — warm and approachable";
+
+      if (mode === "sequence") {
+        // ── 4-step cadence ────────────────────────────────────────────────────
+        const seqRaw = await chat(SONNET,
+          "You are a B2B outreach strategist. Return ONLY valid JSON — no preamble, no code fences.",
+          `Create a 4-email cold outreach sequence for ${dName} (${dTitle}) at ${dCo}. Tone: ${toneDesc}. Max 100 words per email. Each email builds on the previous.
+
+Signals:
+- Structural: ${sigs.structural}
+- Situational: ${sigs.situational}
+- Psychological: ${sigs.psychological || "N/A"}
+- Pain: ${sigs.companyPain}
+
+Email 1 (Day 1): First touch — lead with strongest signal, introduce yourself, single soft CTA
+Email 2 (Day 3): Value-add — share a relevant insight or resource, no hard ask
+Email 3 (Day 7): Social proof — brief case study or result, soft ask
+Email 4 (Day 14): Breakup — respectful, assume they're busy not uninterested, leave door open
+
+Return JSON:
+{
+  "sequence": [
+    { "label": "Day 1",  "subject": "...", "body": "..." },
+    { "label": "Day 3",  "subject": "...", "body": "..." },
+    { "label": "Day 7",  "subject": "...", "body": "..." },
+    { "label": "Day 14", "subject": "...", "body": "..." }
+  ]
+}`, 2048);
+        const { sequence: seq = [] } = parseJson(seqRaw);
+        const variants = seq.map(s => ({ label: s.label, subjects: [s.subject || ""], body: s.body || "" }));
+        setEditedVariants(variants);
+        setSt("sonnet", "done");
+        setActiveIdx(0);
+        const entry = { id: Date.now(), company: dCo, contactName: dName, tone, mode, variants, signals: sigs, ts: Date.now() };
+        setHistory(prev => { const u = [entry, ...prev].slice(0, 25); localStorage.setItem("ff_outreach_history", JSON.stringify(u)); return u; });
+
+      } else {
+        // ── 3 variants + LinkedIn ─────────────────────────────────────────────
+        const varRaw = await chat(SONNET,
+          "You are an elite B2B cold email copywriter. Return ONLY valid JSON — no preamble, no code fences.",
+          `Write 3 cold email variants + 1 LinkedIn message. Tone: ${toneDesc}.
+Email max 120 words. Subject lines ≤7 words. No "Hope this finds you well."
+LinkedIn: 150-word max, connection-request register, no subject line, warm and specific.
+
+Contact: ${dName} (${dTitle}) at ${dCo}
+Signals:
+- Structural: ${sigs.structural}
+- Situational: ${sigs.situational}
+- Psychological: ${sigs.psychological || "N/A — use strongest available signal"}
+- Pain: ${sigs.companyPain}
+
+Variant 1 (Role-led): Lead with structural fit
+Variant 2 (Trigger-led): Lead with situational fit
+Variant 3 (Personal-led): Lead with psychological fit or strongest angle
+
+Return JSON:
+{
+  "variants": [
+    { "label": "Role-led",     "subjects": ["subject 1", "subject 2"], "body": "..." },
+    { "label": "Trigger-led",  "subjects": ["subject 1", "subject 2"], "body": "..." },
+    { "label": "Personal-led", "subjects": ["subject 1", "subject 2"], "body": "..." }
+  ],
+  "linkedin": "LinkedIn message text"
+}`, 2048);
+
+        const { variants: v = [], linkedin = "" } = parseJson(varRaw);
+        const allVariants = [
+          ...v.map(x => ({ ...x, subjects: [...(x.subjects || [])] })),
+          { label: "LinkedIn", subjects: [], body: linkedin },
+        ];
+        setEditedVariants(allVariants);
+        setSt("sonnet", "done");
+        setActiveIdx(0);
+
+        // Phase 3: Haiku scores the 3 email variants (not LinkedIn)
+        if (v.length > 0) {
+          setScoringInProgress(true);
+          setSt("haiku2", "active");
+          try {
+            const scoreRaw = await chat(HAIKU,
+              "You score B2B emails on personalization. Return ONLY valid JSON — no preamble, no code fences.",
+              `Score each email variant 1–10 on personalization depth.
+10 = uses specific named details (company, exact trigger, personal reference).
+1 = generic template with no real personalization.
+
+Signals available: ${JSON.stringify({ structural: sigs.structural, situational: sigs.situational, psychological: sigs.psychological, pain: sigs.companyPain })}
+
+${v.map((vv, i) => `Variant ${i + 1}:\n${vv.body}`).join("\n\n")}
+
+Return JSON array of integers only: [score1, score2, score3]`, 256);
+            const parsed = parseJson(scoreRaw);
+            const arr = Array.isArray(parsed) ? parsed : (parsed.scores || []);
+            setScores(arr.slice(0, v.length).map(s => typeof s === "number" ? s : null));
+          } catch { /* non-fatal */ }
+          setSt("haiku2", "done");
+          setScoringInProgress(false);
+        }
+
+        const entry = { id: Date.now(), company: dCo, contactName: dName, tone, mode, variants: allVariants, signals: sigs, ts: Date.now() };
+        setHistory(prev => { const u = [entry, ...prev].slice(0, 25); localStorage.setItem("ff_outreach_history", JSON.stringify(u)); return u; });
+      }
+
+    } catch (e) {
+      setError(String(e));
+      setStStates(s => { const u = { ...s }; Object.keys(u).forEach(k => { if (u[k] === "active") u[k] = "error"; }); return u; });
+    } finally {
+      setGenerating(false);
+      setScoringInProgress(false);
+    }
+  };
+
+  const canGenerate = (company.trim() || intelCtx.trim()) && !generating;
+  const activeStages = mode === "sequence" ? OUTREACH_STAGES.slice(0, 2) : OUTREACH_STAGES;
+  const showPipeline = generating || editedVariants.length > 0 || !!error;
+  const scoreColor = (s) => s >= 8 ? c.green : s >= 5 ? c.amber : c.red;
+
+  return (
+    <div style={{ flex:1, display:"flex", overflow:"hidden" }}>
+
+      {/* Left panel */}
+      <div style={{ width:320, flexShrink:0, borderRight:`1px solid ${c.border}`, display:"flex", flexDirection:"column", background:c.surface }}>
+
+        {/* Bridge banner */}
+        {outreachBridge && (
+          <div style={{ padding:"10px 16px", background:c.accentGlow, borderBottom:`1px solid ${c.accentDim}`, display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
+            <span style={{ fontSize:12, color:c.accent }}>
+              Context from Intel run for <strong>{outreachBridge.company}</strong>
+            </span>
+            <button
+              onClick={() => { onClearBridge(); setContactName(""); setContactTitle(""); setCompany(""); setIntelCtx(""); }}
+              style={{ fontSize:12, color:c.accent, background:"none", border:"none", padding:"0 4px", cursor:"pointer", lineHeight:1 }}>
+              ×
+            </button>
+          </div>
+        )}
+
+        <div style={{ flex:1, overflow:"auto", padding:20 }}>
+          {/* Contact fields */}
+          <div style={{ fontSize:11, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:8 }}>Contact</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:6, marginBottom:16 }}>
+            <input type="text" value={contactName} onChange={e => setContactName(e.target.value)}
+              placeholder="Name (e.g. Jane Smith)"
+              style={{ width:"100%", padding:"8px 10px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:12, outline:"none" }} />
+            <input type="text" value={contactTitle} onChange={e => setContactTitle(e.target.value)}
+              placeholder="Title (e.g. CTO)"
+              style={{ width:"100%", padding:"8px 10px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:12, outline:"none" }} />
+            <input type="text" value={company} onChange={e => setCompany(e.target.value)}
+              placeholder="Company (required)"
+              style={{ width:"100%", padding:"8px 10px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:12, outline:"none" }} />
+          </div>
+
+          {/* Intel context */}
+          <div style={{ fontSize:11, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:8 }}>Intel Context</div>
+          <textarea
+            value={intelCtx}
+            onChange={e => setIntelCtx(e.target.value)}
+            placeholder={"Paste intel pack, notes, or context.\n\nInclude: pain points, hiring signals, recent news, tech stack, blog posts…"}
+            rows={8}
+            style={{ width:"100%", padding:"10px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:10, color:c.text, fontSize:12, fontFamily:"monospace", lineHeight:1.5, outline:"none", resize:"none" }}
+          />
+
+          {/* Tone selector */}
+          <div style={{ marginTop:14 }}>
+            <div style={{ fontSize:11, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:8 }}>Tone</div>
+            <div style={{ display:"flex", gap:4, background:c.bg, borderRadius:8, padding:3, border:`1px solid ${c.border}` }}>
+              {["direct","balanced","formal"].map(t => (
+                <button key={t} onClick={() => setTone(t)}
+                  style={{ flex:1, padding:"5px 0", borderRadius:6, border:"none", fontSize:11, fontWeight:600, background: tone === t ? c.accent : "transparent", color: tone === t ? "#fff" : c.textSub, transition:"all 0.15s", textTransform:"capitalize" }}>
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Output mode toggle */}
+          <div style={{ marginTop:10 }}>
+            <div style={{ fontSize:11, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:8 }}>Output Mode</div>
+            <div style={{ display:"flex", gap:4, background:c.bg, borderRadius:8, padding:3, border:`1px solid ${c.border}` }}>
+              {[["variants","3 Variants"],["sequence","4-Step Sequence"]].map(([val, lbl]) => (
+                <button key={val} onClick={() => setMode(val)}
+                  style={{ flex:1, padding:"5px 0", borderRadius:6, border:"none", fontSize:11, fontWeight:600, background: mode === val ? c.accent : "transparent", color: mode === val ? "#fff" : c.textSub, transition:"all 0.15s" }}>
+                  {lbl}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <button onClick={handleGenerate} disabled={!canGenerate}
+            style={{ marginTop:16, width:"100%", padding:"12px 0", borderRadius:10, border:"none", background:c.accent, color:"#fff", fontSize:14, fontWeight:700, opacity: canGenerate ? 1 : 0.45, transition:"opacity 0.15s", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
+            {generating ? (
+              <><div style={{ width:14, height:14, borderRadius:"50%", border:"2px solid rgba(255,255,255,0.3)", borderTopColor:"#fff", animation:"spin 0.8s linear infinite" }} />Generating…</>
+            ) : "Generate Emails"}
+          </button>
+
+          {error && (
+            <div style={{ marginTop:12, padding:"10px 12px", background:c.redDim, border:`1px solid ${c.red}44`, borderRadius:10, fontSize:12, color:c.red }}>
+              <strong>Error:</strong> {error}
+              <button onClick={handleGenerate} style={{ display:"block", marginTop:6, fontSize:12, color:c.accent, background:"none", border:"none", padding:0, cursor:"pointer" }}>Try again →</button>
+            </div>
+          )}
+
+          {/* Pipeline steps */}
+          {showPipeline && (
+            <div style={{ marginTop:20, borderTop:`1px solid ${c.border}`, paddingTop:14 }}>
+              <div style={{ fontSize:11, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:8 }}>Pipeline</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+                {OUTREACH_STAGES.map(stage => (
+                  <PipelineStep key={stage.id} stage={stage} status={stStates[stage.id] || "pending"} c={c} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Extracted signals */}
+          {signals && (
+            <div style={{ marginTop:16, padding:"12px 14px", background:c.card, border:`1px solid ${c.border}`, borderRadius:10 }}>
+              <div style={{ fontSize:11, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:10 }}>Extracted Signals</div>
+              {[["Structural", signals.structural], ["Situational", signals.situational], ["Psychological", signals.psychological], ["Pain", signals.companyPain]].filter(([, v]) => v).map(([label, val]) => (
+                <div key={label} style={{ marginBottom:8 }}>
+                  <div style={{ fontSize:9, fontWeight:700, color:c.accent, textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:2 }}>{label}</div>
+                  <div style={{ fontSize:11, color:c.textSub, lineHeight:1.4 }}>{val}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* History */}
+          {history.length > 0 && (
+            <div style={{ marginTop:16, borderTop:`1px solid ${c.border}`, paddingTop:14 }}>
+              <button onClick={() => setHistoryOpen(o => !o)}
+                style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, fontWeight:700, color:c.textMuted, letterSpacing:"0.08em", textTransform:"uppercase", background:"none", border:"none", padding:0, cursor:"pointer", marginBottom:8 }}>
+                <span>{historyOpen ? "▼" : "▶"}</span>
+                History
+                <span style={{ fontSize:10, padding:"1px 5px", borderRadius:3, background:c.card, color:c.textMuted, border:`1px solid ${c.border}` }}>{history.length}</span>
+              </button>
+              {historyOpen && (
+                <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                  {history.slice(0, 10).map(h => (
+                    <button key={h.id}
+                      onClick={() => {
+                        setCompany(h.company);
+                        setContactName(h.contactName);
+                        setTone(h.tone);
+                        setEditedVariants(h.variants.map(x => ({ ...x, subjects: [...(x.subjects || [])] })));
+                        setSignals(h.signals);
+                        setActiveIdx(0);
+                        setStStates({ haiku: "done", sonnet: "done" });
+                      }}
+                      style={{ textAlign:"left", padding:"8px 10px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, cursor:"pointer" }}
+                      onMouseEnter={e => e.currentTarget.style.borderColor = c.borderLight}
+                      onMouseLeave={e => e.currentTarget.style.borderColor = c.border}>
+                      <div style={{ fontSize:12, fontWeight:600, color:c.text, marginBottom:2 }}>{h.company}</div>
+                      <div style={{ fontSize:10, color:c.textMuted }}>{h.contactName} · {h.tone} · {new Date(h.ts).toLocaleDateString("en-US", { month:"short", day:"numeric" })}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Right panel: email variants */}
+      <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+        {editedVariants.length === 0 ? (
+          <div style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", color:c.textMuted, textAlign:"center", padding:40 }}>
+            <div style={{ fontSize:40, marginBottom:16, opacity:0.15 }}>✉</div>
+            <div style={{ fontSize:16, fontWeight:600, color:c.textSub, marginBottom:8 }}>Three-Signal Email Drafts</div>
+            <div style={{ fontSize:13, color:c.textMuted, maxWidth:380, lineHeight:1.7 }}>
+              Add a company and intel context, then click <strong style={{ color:c.textSub }}>Generate Emails</strong>.<br/><br/>
+              Use <strong style={{ color:c.textSub }}>3 Variants</strong> to choose the best single email, or <strong style={{ color:c.textSub }}>4-Step Sequence</strong> for a full cadence over 2 weeks.
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Variant tabs — with score badges + Sharpen */}
+            <div style={{ display:"flex", borderBottom:`1px solid ${c.border}`, background:c.surface, flexShrink:0, alignItems:"center" }}>
+              {editedVariants.map((v, i) => {
+                const score = (mode === "variants" && i < scores.length) ? scores[i] : null;
+                const isLinkedIn = v.label === "LinkedIn";
+                return (
+                  <button key={i} onClick={() => setActiveIdx(i)}
+                    style={{ padding:"10px 16px", border:"none", borderBottom:`2px solid ${activeIdx === i ? c.accent : "transparent"}`, background:"transparent", color: activeIdx === i ? c.accent : c.textSub, fontSize:12, fontWeight: activeIdx === i ? 700 : 500, cursor:"pointer", transition:"all 0.15s", display:"flex", alignItems:"center", gap:5 }}>
+                    {v.label}
+                    {score !== null && (
+                      <span style={{ fontSize:9, padding:"1px 5px", borderRadius:3, background:`${scoreColor(score)}22`, color:scoreColor(score), fontWeight:700, border:`1px solid ${scoreColor(score)}44` }}>
+                        {score}
+                      </span>
+                    )}
+                    {mode === "variants" && scoringInProgress && !isLinkedIn && i < 3 && score === null && (
+                      <span style={{ fontSize:9, color:c.textMuted }}>…</span>
+                    )}
+                  </button>
+                );
+              })}
+              <div style={{ flex:1 }} />
+              {/* Sharpen — variants mode only, not LinkedIn */}
+              {mode === "variants" && editedVariants[activeIdx]?.label !== "LinkedIn" && (
+                <button
+                  onClick={() => handleSharpen(activeIdx)}
+                  disabled={sharpeningIdx !== null || generating}
+                  style={{ padding:"5px 12px", borderRadius:7, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:11, fontWeight:600, opacity:(sharpeningIdx !== null || generating) ? 0.5 : 1 }}>
+                  {sharpeningIdx === activeIdx ? "…" : "Sharpen ↑"}
+                </button>
+              )}
+              <button onClick={handleGenerate} disabled={generating}
+                style={{ margin:"8px 12px", padding:"5px 12px", borderRadius:7, border:`1px solid ${c.border}`, background:"transparent", color:c.textSub, fontSize:11, fontWeight:600, opacity: generating ? 0.5 : 1 }}>
+                ↺ Regenerate
+              </button>
+            </div>
+
+            {/* Active variant */}
+            {editedVariants[activeIdx] && (
+              <div style={{ flex:1, overflow:"auto", padding:24 }}>
+                <VariantCard
+                  variant={editedVariants[activeIdx]}
+                  spamHits={scanSpam(editedVariants[activeIdx].body || "")}
+                  onChange={(field, val) => setEditedVariants(prev => prev.map((v, i) => i === activeIdx ? { ...v, [field]: val } : v))}
+                  c={c}
+                />
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [isDark,       setIsDark]       = useState(() => localStorage.getItem("ff_theme") !== "light");
-  const [view,         setView]         = useState("intel"); // "intel" | "feature_request"
+  const [view,         setView]         = useState("intel"); // "intel" | "feature_request" | "outreach"
   const [markdown,     setMarkdown]     = useState("");
   const [anthropicKey, setAnthropicKey] = useState(() => localStorage.getItem("ff_anthropic_key") || "");
   const [apolloKey,    setApolloKey]    = useState("");
-  const [bridgeContext, setBridgeContext] = useState(null); // { companyName, notes }
+  const [bridgeContext,   setBridgeContext]   = useState(null); // { companyName, notes }
+  const [outreachBridge,  setOutreachBridge]  = useState(null); // { contactName, contactTitle, company, intelContext }
   const [showSettings, setShowSettings] = useState(false);
   const [stageStatus,  setStageStatus]  = useState({});
   const [stageDetail,  setStageDetail]  = useState({});
@@ -1575,6 +2153,7 @@ export default function App() {
     setContacts([]); setChecklist([]); setTargetTitles([]);
     setQueryLog([]); setPipelineLog([]); setError(null); setDone(false);
     setBridgeContext(null);
+    setOutreachBridge(null);
   };
 
   const addLog = useCallback((stage, label, data) => {
@@ -1911,6 +2490,7 @@ Return JSON:
       });
       setCurrentRunId(savedRun.id);
       setBridgeContext(buildBridgeContext(log, sorted, runLog));
+      setOutreachBridge(buildOutreachBridge(sorted, markdown));
       setDone(true);
 
     } catch (err) {
@@ -1956,7 +2536,7 @@ Return JSON:
             <div style={{ width:28, height:28, borderRadius:8, background:c.accentDim, display:"flex", alignItems:"center", justifyContent:"center" }}><span style={{ fontSize:14 }}>✉</span></div>
             <span style={{ fontWeight:700, fontSize:15, letterSpacing:"-0.02em", color:c.text }}>FinalFold</span>
             <div style={{ display:"flex", gap:2, marginLeft:12, background:c.bg, borderRadius:8, padding:3, border:`1px solid ${c.border}`, WebkitAppRegion:"no-drag" }}>
-              {[["intel","Intel"], ["feature_request","Feature Requests"]].map(([val, lbl]) => (
+              {[["intel","Intel"], ["feature_request","Feature Requests"], ["outreach","Outreach"]].map(([val, lbl]) => (
                 <button key={val} onClick={() => setView(val)}
                   style={{ padding:"4px 12px", borderRadius:6, border:"none", fontSize:12, fontWeight:600, background: view === val ? c.accent : "transparent", color: view === val ? "#fff" : c.textSub, transition:"all 0.15s", cursor:"pointer" }}>
                   {lbl}
@@ -1980,6 +2560,11 @@ Return JSON:
           {view === "feature_request" && (
             <FeatureRequestView c={c} onOpenSettings={() => setShowSettings(true)}
               bridgeContext={bridgeContext} onClearBridge={() => setBridgeContext(null)} />
+          )}
+
+          {view === "outreach" && (
+            <OutreachView c={c} apiKey={anthropicKey} onOpenSettings={() => setShowSettings(true)}
+              outreachBridge={outreachBridge} onClearBridge={() => setOutreachBridge(null)} />
           )}
 
           {/* Intel view */}
@@ -2101,6 +2686,13 @@ Return JSON:
                         Scope a Feature →
                       </button>
                     )}
+                    {done && outreachBridge && (
+                      <button
+                        onClick={() => setView("outreach")}
+                        style={{ padding:"6px 14px", borderRadius:7, border:`1px solid ${c.green}`, background:"transparent", color:c.green, fontSize:12, fontWeight:600 }}>
+                        Draft Outreach →
+                      </button>
+                    )}
                     <div style={{ display:"flex", gap:4, background:c.bg, borderRadius:8, padding:4, border:`1px solid ${c.border}` }}>
                       {[["all", `All (${contacts.length})`], ["email", `Has Email (${withEmail})`]].map(([val, lbl]) => (
                         <button key={val} onClick={() => setFilter(val)} style={{ padding:"5px 14px", borderRadius:6, border:"none", fontSize:12, fontWeight:600, background: filter === val ? c.accent : "transparent", color: filter === val ? "#fff" : c.textSub, transition:"all 0.15s" }}>{lbl}</button>
@@ -2112,7 +2704,11 @@ Return JSON:
                   <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(300px, 1fr))", gap:14 }}>
                     {filtered.map(contact => (
                       <ContactCard key={contact.id} contact={contact}
-                        checklist={checklist} targetTitles={targetTitles} c={c} />
+                        checklist={checklist} targetTitles={targetTitles} c={c}
+                        onDraftOutreach={(ct) => {
+                          setOutreachBridge({ contactName: ct.name, contactTitle: ct.title, company: ct.company, intelContext: markdown });
+                          setView("outreach");
+                        }} />
                     ))}
                   </div>
                 ) : (
