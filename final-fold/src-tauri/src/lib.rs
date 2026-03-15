@@ -189,6 +189,86 @@ fn open_url(url: String) -> Result<(), String> {
     open::that(&url).map_err(|e| format!("Failed to open URL: {}", e))
 }
 
+// ── Fetch URL text (FF-25) ────────────────────────────────────────────────────
+// Fetches a public URL and strips HTML tags, returning the first ~4000 chars of
+// readable text content for company website analysis.
+
+#[tauri::command]
+async fn fetch_url_text(url: String) -> Result<String, String> {
+    let client = Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; FinalFold/1.0; +https://foxworks.dev)")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Client build error: {}", e))?;
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Fetch failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+
+    let html = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read body: {}", e))?;
+
+    // Remove script/style/head/nav/footer blocks entirely
+    let cleaned = strip_block_tags(&html, &["script", "style", "head", "nav", "footer", "svg"]);
+    // Strip remaining HTML tags
+    let text = strip_html_tags(&cleaned);
+    // Normalize whitespace and collect non-empty lines
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && l.len() > 2)
+        .collect();
+    let result = lines.join("\n");
+    Ok(result.chars().take(4000).collect())
+}
+
+fn strip_block_tags(html: &str, tags: &[&str]) -> String {
+    let mut result = html.to_string();
+    for tag in tags {
+        let open_pat  = format!("<{}", tag);
+        let close_pat = format!("</{}>", tag);
+        let mut out = String::new();
+        let mut pos = 0;
+        while pos < result.len() {
+            if let Some(open_off) = result[pos..].find(&open_pat) {
+                let abs_open = pos + open_off;
+                out.push_str(&result[pos..abs_open]);
+                if let Some(close_off) = result[abs_open..].find(&close_pat) {
+                    pos = abs_open + close_off + close_pat.len();
+                } else {
+                    pos = result.len();
+                }
+            } else {
+                out.push_str(&result[pos..]);
+                break;
+            }
+        }
+        result = out;
+    }
+    result
+}
+
+fn strip_html_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => { in_tag = false; out.push(' '); }
+            _   => if !in_tag { out.push(ch); },
+        }
+    }
+    out
+}
+
 // ── Credential verification ───────────────────────────────────────────────────
 
 /// Verifies an Anthropic API key by making a minimal /v1/models request.
@@ -278,6 +358,7 @@ pub fn run() {
             apollo_people_search,
             apollo_bulk_match,
             open_url,
+            fetch_url_text,
             verify_anthropic_key,
             verify_github_pat,
             // Feature Request Generator — credentials (OS keychain)

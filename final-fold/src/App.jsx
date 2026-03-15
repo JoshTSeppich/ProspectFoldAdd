@@ -86,6 +86,50 @@ function scanSpam(text) {
   return SPAM_WORDS.filter(w => new RegExp(`\\b${w.replace(/ /g, "\\s+")}\\b`, "i").test(text));
 }
 
+// ─── MCP Opportunity Map (FF-25) ──────────────────────────────────────────────
+const MCP_OPPORTUNITY_MAP = {
+  "Notion":       "give Claude full read/write access to your docs, wikis, and project databases",
+  "GitHub":       "give Claude full context on your codebase, PRs, issues, and CI/CD pipeline",
+  "Salesforce":   "pull live CRM data — deals, contacts, accounts — into any Claude workflow",
+  "HubSpot":      "give Claude access to contacts, deals, and marketing sequences in real time",
+  "Jira":         "let Claude create, triage, and comment on Jira tickets from natural language",
+  "Linear":       "give Claude full read/write access to your engineering sprint and backlog",
+  "Slack":        "let Claude read channel history, surface insights, and post summaries",
+  "Confluence":   "give Claude access to your internal knowledge base and technical docs",
+  "Figma":        "let Claude inspect design files and generate code from components",
+  "Postgres":     "give Claude direct query access to your production or analytics database",
+  "MongoDB":      "give Claude read access to your document store for live data lookups",
+  "Stripe":       "pull real-time billing, subscription, and customer data into Claude",
+  "Zendesk":      "let Claude read support tickets and suggest resolutions using your KB",
+  "Intercom":     "give Claude context on customer conversations for smarter support automation",
+  "Airtable":     "give Claude read/write access to your operational databases and workflows",
+  "Google Drive": "give Claude access to your shared docs, spreadsheets, and slide decks",
+  "Asana":        "let Claude create and update tasks from natural language descriptions",
+  "Snowflake":    "give Claude query access to your data warehouse for real-time analytics",
+  "dbt":          "let Claude understand your data models and transformation pipeline",
+  "Supabase":     "give Claude direct read/write access to your Supabase database and auth",
+  "Vercel":       "let Claude inspect deployments, logs, and environment configs",
+};
+
+async function analyzeCompanyWebsite(domain, apiKey, foxCtx = {}) {
+  const url = `https://${domain}`;
+  const rawText = await invoke("fetch_url_text", { url });
+  const toolList = Object.keys(MCP_OPPORTUNITY_MAP).join(", ");
+  const foxInstructions = [
+    foxCtx.pitch && `Seller context: ${foxCtx.pitch}`,
+    foxCtx.icp   && `Ideal customer: ${foxCtx.icp}`,
+  ].filter(Boolean).join("\n");
+  const systemPrompt = [
+    "You are an MCP integration opportunity analyst for Foxworks, a company that builds custom MCP (Model Context Protocol) servers.",
+    foxInstructions,
+    "Analyze the company website text. Identify tools they use, their AI maturity, and which MCP integrations Foxworks could build for them.",
+    "Return ONLY valid JSON — no preamble, no code fences.",
+  ].filter(Boolean).join("\n");
+  const userPrompt = `Website text from ${domain}:\n---\n${rawText.slice(0, 3800)}\n---\nKnown tools to detect: ${toolList}\n\nReturn JSON:\n{\n  "productSummary": "one sentence",\n  "aiMaturity": "curious"|"building"|"native",\n  "tools": ["Tool1","Tool2"],\n  "mcpOpportunities": [{"tool":"GitHub","pitch":"..."}]\n}\nOnly include tools you have evidence for. Max 5 opportunities.`;
+  const raw = await invoke("anthropic_chat", { apiKey, model: SONNET, system: systemPrompt, userMessage: userPrompt, maxTokens: 800 });
+  return parseJson(raw);
+}
+
 function emailScore(c) {
   if (!c.email) return 0;
   if (c.emailStatus === "verified") return 3;
@@ -180,6 +224,31 @@ function fitScore(checks) {
   const checkable = checks.filter(x => x.checkable);
   const passed    = checkable.filter(x => x.passed === true);
   return checkable.length ? Math.round((passed.length / checkable.length) * 100) : null;
+}
+
+// ─── Domain helper (FF-25) ────────────────────────────────────────────────────
+function emailToDomain(email) {
+  if (!email) return null;
+  const parts = email.split("@");
+  return parts.length === 2 ? parts[1].toLowerCase() : null;
+}
+
+// ─── AI Signal Score (FF-24) ──────────────────────────────────────────────────
+const AI_TITLE_KW    = /\b(ai|ml|llm|machine.learning|nlp|data|platform|intelligence|automation|agent|model)\b/i;
+const AI_DM_TITLES   = /\b(cto|chief.technolog|vp.{0,6}engineer|head.of.(ai|ml|data|engineering|platform)|director.of.(ai|ml|data|engineering|platform)|principal.engineer|staff.engineer)\b/i;
+const AI_COMPANY_KW  = /\b(ai|artificial.intelligence|machine.learning|ml|data|intelligence|automation|agent|llm|language.model|generative)\b/i;
+
+function computeAISignalScore(contact) {
+  const title   = (contact.title   || "").toLowerCase();
+  const company = (contact.company || "").toLowerCase();
+  const desc    = (contact.industry || contact.companyDescription || "").toLowerCase();
+  const size    = typeof contact.companySize === "number" ? contact.companySize
+                : typeof contact.companySize === "string" ? parseInt(contact.companySize, 10) : 0;
+  const signals = [];
+  if (AI_TITLE_KW.test(title))                                     signals.push("Title contains AI/ML/data keyword");
+  if (AI_DM_TITLES.test(title) && (!size || size < 500))           signals.push("Technical decision-maker at a small-to-mid company");
+  if (AI_COMPANY_KW.test(company) || AI_COMPANY_KW.test(desc))     signals.push("Company or industry suggests AI-native / AI-building");
+  return { score: signals.length, signals };
 }
 
 // ─── Apollo search with 3-tier fallback ───────────────────────────────────────
@@ -357,6 +426,28 @@ function deleteTemplate(id) {
 function incrementTemplateUse(id) {
   const data = loadTemplates();
   if (data[id]) { data[id].useCount = (data[id].useCount || 0) + 1; saveTemplates(data); }
+}
+
+// ─── Foxworks context storage (FF-23) ─────────────────────────────────────────
+const FOXWORKS_KEY = "ff_foxworks_context";
+function loadFoxworksContext() {
+  try { return JSON.parse(localStorage.getItem(FOXWORKS_KEY) || "{}"); } catch { return {}; }
+}
+function saveFoxworksContext(data) { localStorage.setItem(FOXWORKS_KEY, JSON.stringify(data)); }
+
+// ─── Company intel storage (FF-25) ────────────────────────────────────────────
+const COMPANY_INTEL_KEY = "ff_company_intel";
+function loadCompanyIntel() {
+  try { return JSON.parse(localStorage.getItem(COMPANY_INTEL_KEY) || "{}"); } catch { return {}; }
+}
+function saveCompanyIntel(domain, intel) {
+  const data = loadCompanyIntel();
+  data[domain] = { ...intel, analyzedAt: Date.now() };
+  localStorage.setItem(COMPANY_INTEL_KEY, JSON.stringify(data));
+}
+function getCompanyIntel(domain) {
+  if (!domain) return null;
+  return loadCompanyIntel()[domain] || null;
 }
 
 // ─── Saved runs storage ───────────────────────────────────────────────────────
@@ -701,11 +792,66 @@ function SendPreviewModal({ to, subject, body, onConfirm, onCancel, c }) {
   );
 }
 
-function ContactCard({ contact, checklist, targetTitles, onDraftOutreach, onAddToPipeline, c }) {
-  const initials = (contact.name || "?").split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
-  const checks   = checklist?.length ? runQualChecks(contact, checklist, targetTitles) : [];
-  const score    = fitScore(checks);
+// ─── AI Signal Badge (FF-24) ──────────────────────────────────────────────────
+function AISignalBadge({ score, signals, c }) {
+  const [hovered, setHovered] = useState(false);
+  if (score === 0) return null;
+  const color    = score >= 3 ? c.green : score === 2 ? c.amber : c.textSub;
+  const bgColor  = score >= 3 ? `${c.green}1a` : score === 2 ? `${c.amber}1a` : `${c.textSub}1a`;
+  const label    = score >= 3 ? "High AI Signal" : score === 2 ? "AI Signal" : "Possible Signal";
+  const dots     = "●".repeat(score) + "○".repeat(3 - score);
+  return (
+    <div style={{ position:"relative", display:"inline-flex" }}
+      onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
+      <span style={{ fontSize:10, padding:"2px 7px", borderRadius:10, background:bgColor, color, fontWeight:700,
+        border:`1px solid ${color}33`, letterSpacing:"0.02em", display:"inline-flex", alignItems:"center", gap:4, cursor:"default", flexShrink:0 }}>
+        {dots} {label}
+      </span>
+      {hovered && signals.length > 0 && (
+        <div style={{ position:"absolute", bottom:"calc(100% + 5px)", left:0, zIndex:200,
+          background:c.surface, border:`1px solid ${c.border}`, borderRadius:8,
+          padding:"8px 12px", minWidth:220, boxShadow:"0 4px 16px rgba(0,0,0,0.25)", pointerEvents:"none" }}>
+          <div style={{ fontSize:10, fontWeight:700, color:c.textMuted, letterSpacing:"0.07em", textTransform:"uppercase", marginBottom:5 }}>
+            AI Signals Detected
+          </div>
+          {signals.map((s, i) => (
+            <div key={i} style={{ fontSize:11, color:c.text, marginTop:3, display:"flex", gap:6, alignItems:"flex-start" }}>
+              <span style={{ color, flexShrink:0 }}>✓</span> {s}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContactCard({ contact, checklist, targetTitles, onDraftOutreach, onAddToPipeline, onUseIntel, apiKey, c }) {
+  const initials      = (contact.name || "?").split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
+  const checks        = checklist?.length ? runQualChecks(contact, checklist, targetTitles) : [];
+  const score         = fitScore(checks);
   const contactedInfo = getContactedInfo(contact.email);
+  const aiSignal      = computeAISignalScore(contact);
+  const domain        = emailToDomain(contact.email);
+
+  // FF-25: website analysis state
+  const [intel,       setIntel]       = useState(() => domain ? getCompanyIntel(domain) : null);
+  const [analyzing,   setAnalyzing]   = useState(false);
+  const [analyzeErr,  setAnalyzeErr]  = useState(null);
+
+  const handleAnalyze = async () => {
+    if (!domain || analyzing || !apiKey) return;
+    setAnalyzing(true); setAnalyzeErr(null);
+    try {
+      const foxCtx = loadFoxworksContext();
+      const result = await analyzeCompanyWebsite(domain, apiKey, foxCtx);
+      saveCompanyIntel(domain, result);
+      setIntel(result);
+    } catch (e) {
+      setAnalyzeErr(String(e).replace(/^Error:\s*/, "").slice(0, 120));
+    } finally {
+      setAnalyzing(false);
+    }
+  };
 
   return (
     <div style={{ background:c.card, border:`1px solid ${c.border}`, borderRadius:12, padding:18, transition:"border-color 0.15s,background 0.15s", boxShadow: c === LIGHT ? "0 1px 3px rgba(0,0,0,0.06)" : "none" }}
@@ -719,7 +865,7 @@ function ContactCard({ contact, checklist, targetTitles, onDraftOutreach, onAddT
           : <div style={{ width:40, height:40, borderRadius:"50%", flexShrink:0, background:c.accentDim, color:c.accent, display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, fontWeight:700 }}>{initials}</div>
         }
         <div style={{ flex:1, minWidth:0 }}>
-          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
             <span style={{ fontSize:14, fontWeight:700, color:c.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{contact.name}</span>
             {contact.linkedinUrl && (
               <a href="#" onClick={e => { e.preventDefault(); invoke("open_url", { url: contact.linkedinUrl }); }}
@@ -731,6 +877,10 @@ function ContactCard({ contact, checklist, targetTitles, onDraftOutreach, onAddT
               <span style={{ fontSize:10, padding:"2px 7px", borderRadius:10, background:`${c.green}1a`, color:c.green, fontWeight:600, flexShrink:0, border:`1px solid ${c.green}33` }}>
                 ✓ Contacted {formatRelativeTime(contactedInfo.contactedAt)}
               </span>
+            )}
+            {/* FF-24: AI Signal badge */}
+            {aiSignal.score > 0 && (
+              <AISignalBadge score={aiSignal.score} signals={aiSignal.signals} c={c} />
             )}
             {score !== null && (
               <span style={{ marginLeft:"auto", fontSize:11, fontWeight:700, color: score >= 75 ? c.green : score >= 50 ? c.amber : c.red, flexShrink:0 }}>
@@ -766,26 +916,72 @@ function ContactCard({ contact, checklist, targetTitles, onDraftOutreach, onAddT
       </div>
 
       {/* Actions row */}
-      {(onDraftOutreach || onAddToPipeline) && (
-        <div style={{ marginTop:10, display:"flex", gap:6, justifyContent:"flex-end" }}>
-          {onAddToPipeline && (
-            <button
-              onClick={() => onAddToPipeline(contact)}
-              style={{ padding:"4px 12px", borderRadius:6, border:`1px solid ${c.accent}44`, background:`${c.accent}11`, color:c.accent, fontSize:11, fontWeight:600, cursor:"pointer", transition:"all 0.15s" }}
-              onMouseEnter={e => { e.currentTarget.style.background = `${c.accent}22`; e.currentTarget.style.borderColor = c.accent; }}
-              onMouseLeave={e => { e.currentTarget.style.background = `${c.accent}11`; e.currentTarget.style.borderColor = `${c.accent}44`; }}>
-              + Pipeline
+      <div style={{ marginTop:10, display:"flex", gap:6, justifyContent:"flex-end", flexWrap:"wrap" }}>
+        {onAddToPipeline && (
+          <button onClick={() => onAddToPipeline(contact)}
+            style={{ padding:"4px 12px", borderRadius:6, border:`1px solid ${c.accent}44`, background:`${c.accent}11`, color:c.accent, fontSize:11, fontWeight:600, cursor:"pointer", transition:"all 0.15s" }}
+            onMouseEnter={e => { e.currentTarget.style.background = `${c.accent}22`; e.currentTarget.style.borderColor = c.accent; }}
+            onMouseLeave={e => { e.currentTarget.style.background = `${c.accent}11`; e.currentTarget.style.borderColor = `${c.accent}44`; }}>
+            + Pipeline
+          </button>
+        )}
+        {/* FF-25: Analyze button */}
+        {domain && apiKey && (
+          <button onClick={handleAnalyze} disabled={analyzing}
+            style={{ padding:"4px 12px", borderRadius:6, border:`1px solid ${c.border}`, background:"transparent", color: intel ? c.textSub : c.accent, fontSize:11, fontWeight:600, cursor: analyzing ? "wait" : "pointer", transition:"all 0.15s", opacity: analyzing ? 0.6 : 1 }}
+            onMouseEnter={e => { if (!analyzing) { e.currentTarget.style.borderColor = c.accent; e.currentTarget.style.color = c.accent; }}}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = c.border; e.currentTarget.style.color = intel ? c.textSub : c.accent; }}>
+            {analyzing ? "Analyzing…" : intel ? "↺ Re-analyze" : "✦ Analyze"}
+          </button>
+        )}
+        {onDraftOutreach && (
+          <button onClick={() => onDraftOutreach(contact)}
+            style={{ padding:"4px 12px", borderRadius:6, border:`1px solid ${c.green}44`, background:`${c.green}11`, color:c.green, fontSize:11, fontWeight:600, cursor:"pointer", transition:"all 0.15s" }}
+            onMouseEnter={e => { e.currentTarget.style.background = `${c.green}22`; e.currentTarget.style.borderColor = c.green; }}
+            onMouseLeave={e => { e.currentTarget.style.background = `${c.green}11`; e.currentTarget.style.borderColor = `${c.green}44`; }}>
+            Draft Outreach →
+          </button>
+        )}
+      </div>
+
+      {/* FF-25: MCP Opportunity Intel panel */}
+      {intel && (
+        <div style={{ marginTop:10, padding:"10px 12px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8 }}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
+            <div style={{ fontSize:10, fontWeight:700, color:c.textMuted, letterSpacing:"0.07em", textTransform:"uppercase" }}>MCP Opportunities</div>
+            <span style={{
+              fontSize:10, padding:"1px 7px", borderRadius:8, fontWeight:700,
+              color: intel.aiMaturity === "native" ? c.green : intel.aiMaturity === "building" ? c.amber : c.textSub,
+              background: intel.aiMaturity === "native" ? `${c.green}1a` : intel.aiMaturity === "building" ? `${c.amber}1a` : `${c.textSub}1a`,
+              border:`1px solid ${intel.aiMaturity === "native" ? c.green : intel.aiMaturity === "building" ? c.amber : c.textSub}33`,
+            }}>
+              {intel.aiMaturity === "native" ? "AI Native" : intel.aiMaturity === "building" ? "Building AI" : "AI Curious"}
+            </span>
+          </div>
+          {intel.productSummary && (
+            <div style={{ fontSize:11, color:c.textSub, marginBottom:8, fontStyle:"italic", lineHeight:1.4 }}>{intel.productSummary}</div>
+          )}
+          <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginBottom:8 }}>
+            {(intel.mcpOpportunities || []).map(({ tool, pitch }) => (
+              <span key={tool} title={pitch}
+                style={{ fontSize:10, padding:"3px 8px", borderRadius:10, background:`${c.accent}1a`, color:c.accent, fontWeight:600, border:`1px solid ${c.accent}22`, cursor:"default" }}>
+                {tool}
+              </span>
+            ))}
+          </div>
+          {onUseIntel && (intel.mcpOpportunities || []).length > 0 && (
+            <button onClick={() => onUseIntel(intel, domain, contact)}
+              style={{ fontSize:11, fontWeight:700, color:c.green, background:"none", border:"none", padding:0, cursor:"pointer" }}
+              onMouseEnter={e => e.currentTarget.style.textDecoration = "underline"}
+              onMouseLeave={e => e.currentTarget.style.textDecoration = "none"}>
+              Use Intel → Draft Outreach
             </button>
           )}
-          {onDraftOutreach && (
-            <button
-              onClick={() => onDraftOutreach(contact)}
-              style={{ padding:"4px 12px", borderRadius:6, border:`1px solid ${c.green}44`, background:`${c.green}11`, color:c.green, fontSize:11, fontWeight:600, cursor:"pointer", transition:"all 0.15s" }}
-              onMouseEnter={e => { e.currentTarget.style.background = `${c.green}22`; e.currentTarget.style.borderColor = c.green; }}
-              onMouseLeave={e => { e.currentTarget.style.background = `${c.green}11`; e.currentTarget.style.borderColor = `${c.green}44`; }}>
-              Draft Outreach →
-            </button>
-          )}
+        </div>
+      )}
+      {analyzeErr && (
+        <div style={{ marginTop:8, fontSize:11, color:c.red, padding:"5px 8px", background:`${c.red}1a`, borderRadius:6 }}>
+          ⚠ {analyzeErr}
         </div>
       )}
 
@@ -957,6 +1153,10 @@ function SettingsModal({ apiKey, apolloKeyProp, onSave, onClose, onGmailConnecte
   const [apolloExists, setApolloExists] = useState(!!apolloKeyProp);
   const [saved,        setSaved]        = useState(false);
   const [verifyStatus, setVerifyStatus] = useState({});
+  // FF-23: Foxworks context
+  const [foxPitch,       setFoxPitch]       = useState(() => loadFoxworksContext().pitch       || "");
+  const [foxIcp,         setFoxIcp]         = useState(() => loadFoxworksContext().icp         || "");
+  const [foxMeetingLink, setFoxMeetingLink] = useState(() => loadFoxworksContext().meetingLink || "");
   // Gmail OAuth state
   const [gmailEmail,       setGmailEmail]       = useState(null);   // connected email
   const [gmailClientId,    setGmailClientId]    = useState("");
@@ -1013,6 +1213,7 @@ function SettingsModal({ apiKey, apolloKeyProp, onSave, onClose, onGmailConnecte
         setApolloExists(true);
       } catch {}
     }
+    saveFoxworksContext({ pitch: foxPitch.trim(), icp: foxIcp.trim(), meetingLink: foxMeetingLink.trim() });
     onSave(anthropicVal, apolloVal.trim() || apolloKeyProp);
     setSaved(true);
     setTimeout(onClose, 800);
@@ -1174,6 +1375,31 @@ function SettingsModal({ apiKey, apolloKeyProp, onSave, onClose, onGmailConnecte
               )}
             </>
           )}
+        </div>
+
+        {/* ── Foxworks Pitch Context (FF-23) ──────────────────────────────── */}
+        <div style={{ marginTop:22, paddingTop:18, borderTop:`1px solid ${c.border}` }}>
+          <div style={{ fontSize:12, fontWeight:700, color:c.text, marginBottom:4 }}>Foxworks Pitch Context</div>
+          <div style={{ fontSize:11, color:c.textMuted, marginBottom:10, lineHeight:1.6 }}>
+            Injected into every outreach generation — Claude writes emails that specifically explain what Foxworks can do for each contact.
+          </div>
+
+          <label style={{ fontSize:11, fontWeight:600, color:c.textSub, display:"block", marginBottom:4 }}>Company Pitch</label>
+          <textarea value={foxPitch} onChange={e => setFoxPitch(e.target.value)}
+            placeholder="Foxworks builds custom MCP (Model Context Protocol) servers that give AI assistants live access to your internal tools, databases, and APIs. We specialize in fast, production-ready MCP integrations for teams building on Claude."
+            rows={3}
+            style={{ width:"100%", padding:"9px 12px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:12, outline:"none", resize:"vertical", fontFamily:"inherit", lineHeight:1.5 }} />
+
+          <label style={{ fontSize:11, fontWeight:600, color:c.textSub, display:"block", marginTop:10, marginBottom:4 }}>Ideal Customer Profile</label>
+          <textarea value={foxIcp} onChange={e => setFoxIcp(e.target.value)}
+            placeholder="Series A–C SaaS companies with 10–200 engineers actively building AI features with Claude or GPT-4, where the CTO or VP Engineering is dealing with fragmented data sources and custom integration overhead."
+            rows={3}
+            style={{ width:"100%", padding:"9px 12px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:12, outline:"none", resize:"vertical", fontFamily:"inherit", lineHeight:1.5 }} />
+
+          <label style={{ fontSize:11, fontWeight:600, color:c.textSub, display:"block", marginTop:10, marginBottom:4 }}>Meeting / Booking Link</label>
+          <input type="url" value={foxMeetingLink} onChange={e => setFoxMeetingLink(e.target.value)}
+            placeholder="https://calendly.com/foxworks/30min"
+            style={{ width:"100%", padding:"9px 12px", background:c.bg, border:`1px solid ${c.border}`, borderRadius:8, color:c.text, fontSize:12, outline:"none" }} />
         </div>
 
         <div style={{ display:"flex", gap:10, marginTop:24, justifyContent:"flex-end" }}>
@@ -2346,6 +2572,17 @@ ${hasSubjects ? `Subject options: ${v.subjects.join(" | ")}\n\n` : ""}${v.body}`
 
   const handleGenerate = async () => {
     if (!company.trim() && !intelCtx.trim()) return;
+    // FF-23: load Foxworks context to inject into every Sonnet prompt
+    const foxCtx = loadFoxworksContext();
+    const foxInstruction = (foxCtx.pitch || foxCtx.icp)
+      ? [
+          "SELLER CONTEXT — always incorporate into the emails you write:",
+          foxCtx.pitch  && `Company: ${foxCtx.pitch}`,
+          foxCtx.icp    && `Ideal customer: ${foxCtx.icp}`,
+          foxCtx.meetingLink && `CTA link: ${foxCtx.meetingLink}`,
+          "The emails must specifically explain what Foxworks MCP services would do for THIS company and THIS contact — not generic outreach.",
+        ].filter(Boolean).join("\n")
+      : "";
     setGenerating(true);
     setError(null);
     setEditedVariants([]);
@@ -2412,7 +2649,7 @@ ${context}`, 1024);
       if (mode === "sequence") {
         // ── 4-step cadence ────────────────────────────────────────────────────
         const seqRaw = await chat(SONNET,
-          "You are a B2B outreach strategist. Return ONLY valid JSON — no preamble, no code fences.",
+          [foxInstruction, "You are a B2B outreach strategist. Return ONLY valid JSON — no preamble, no code fences."].filter(Boolean).join("\n\n"),
           `Create a 4-email cold outreach sequence for ${dName} (${dTitle}) at ${dCo}. Tone: ${toneDesc}. Max 100 words per email. Each email builds on the previous.
 
 Signals:
@@ -2446,7 +2683,7 @@ Return JSON:
       } else {
         // ── 3 variants + LinkedIn ─────────────────────────────────────────────
         const varRaw = await chat(SONNET,
-          "You are an elite B2B cold email copywriter. Return ONLY valid JSON — no preamble, no code fences.",
+          [foxInstruction, "You are an elite B2B cold email copywriter. Return ONLY valid JSON — no preamble, no code fences."].filter(Boolean).join("\n\n"),
           `Write 3 cold email variants + 1 LinkedIn message. Tone: ${toneDesc}.
 Email max 120 words. Subject lines ≤7 words. No "Hope this finds you well."
 LinkedIn: 150-word max, connection-request register, no subject line, warm and specific.
@@ -3584,6 +3821,7 @@ export default function App() {
   const [error,        setError]        = useState(null);
   const [done,         setDone]         = useState(false);
   const [filter,       setFilter]       = useState("all");
+  const [sort,         setSort]         = useState("default"); // "default" | "aiSignal" | "fitScore"
   const [mode,         setMode]         = useState("intel");
   const abortRef = useRef(false);
 
@@ -3992,9 +4230,18 @@ Return JSON:
   }, [markdown, chat, runTableMode, addLog]);
 
   const contactedMap = loadContacted();
-  const filtered  = filter === "email"        ? contacts.filter(x => x.email)
-                  : filter === "uncontacted"  ? contacts.filter(x => !contactedMap[x.email?.toLowerCase()])
-                  : contacts;
+  const baseFiltered = filter === "email"       ? contacts.filter(x => x.email)
+                     : filter === "uncontacted" ? contacts.filter(x => !contactedMap[x.email?.toLowerCase()])
+                     : contacts;
+  const filtered = [...baseFiltered].sort((a, b) => {
+    if (sort === "aiSignal")  return computeAISignalScore(b).score - computeAISignalScore(a).score;
+    if (sort === "fitScore") {
+      const aS = checklist?.length ? fitScore(runQualChecks(a, checklist, targetTitles)) ?? 0 : 0;
+      const bS = checklist?.length ? fitScore(runQualChecks(b, checklist, targetTitles)) ?? 0 : 0;
+      return bS - aS;
+    }
+    return 0;
+  });
   const withEmail = contacts.filter(x => x.email).length;
   const uncontactedCount = contacts.filter(x => !contactedMap[x.email?.toLowerCase()]).length;
   const showPipeline = running || done || !!error;
@@ -4207,6 +4454,15 @@ Return JSON:
                         <button key={val} onClick={() => setFilter(val)} style={{ padding:"5px 14px", borderRadius:6, border:"none", fontSize:12, fontWeight:600, background: filter === val ? c.accent : "transparent", color: filter === val ? "#fff" : c.textSub, transition:"all 0.15s" }}>{lbl}</button>
                       ))}
                     </div>
+                    {/* FF-24: Sort controls */}
+                    <div style={{ display:"flex", gap:4, background:c.bg, borderRadius:8, padding:4, border:`1px solid ${c.border}` }}>
+                      {[["default","Default"],["aiSignal","AI Signal ↓"],["fitScore","Fit % ↓"]].map(([val, lbl]) => (
+                        <button key={val} onClick={() => setSort(val)}
+                          style={{ padding:"5px 12px", borderRadius:6, border:"none", fontSize:11, fontWeight:600, background: sort === val ? c.accent : "transparent", color: sort === val ? "#fff" : c.textSub, transition:"all 0.15s" }}>
+                          {lbl}
+                        </button>
+                      ))}
+                    </div>
                     {filtered.length > 0 && (
                       <button
                         onClick={() => handleAddAllToPipeline(filtered)}
@@ -4224,11 +4480,23 @@ Return JSON:
                     {filtered.map(contact => (
                       <ContactCard key={contact.id} contact={contact}
                         checklist={checklist} targetTitles={targetTitles} c={c}
+                        apiKey={anthropicKey}
                         onDraftOutreach={(ct) => {
                           setOutreachBridge({ contactName: ct.name, contactTitle: ct.title, company: ct.company, contactEmail: ct.email || "", intelContext: markdown });
                           setView("outreach");
                         }}
                         onAddToPipeline={handleAddToPipeline}
+                        onUseIntel={(intel, domain, ct) => {
+                          const opps = (intel.mcpOpportunities || []).map(o => `- ${o.tool}: ${o.pitch}`).join("\n");
+                          const intelText = [
+                            intel.productSummary && `Company: ${intel.productSummary}`,
+                            `AI maturity: ${intel.aiMaturity}`,
+                            intel.tools?.length  && `Tools detected: ${intel.tools.join(", ")}`,
+                            opps                 && `\nMCP Opportunities:\n${opps}`,
+                          ].filter(Boolean).join("\n");
+                          setOutreachBridge({ contactName: ct.name || "", contactTitle: ct.title || "", company: ct.company || "", contactEmail: ct.email || "", intelContext: intelText });
+                          setView("outreach");
+                        }}
                       />
                     ))}
                   </div>
